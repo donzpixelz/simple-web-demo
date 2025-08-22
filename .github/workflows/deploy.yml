@@ -16,8 +16,8 @@ jobs:
       IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/simple-web-demo
       SERVICE_NAME: web
       COMPOSE_DIR: /opt/simple-web-demo
-      AWS_REGION: us-east-2              # <-- your region
-      EC2_KEY_NAME: simple-web-demo-key  # from terraform.tfvars
+      AWS_REGION: us-east-2              # your region
+      EC2_KEY_NAME: simple-web-demo-key  # your EC2 key pair name
 
     steps:
       - name: Checkout code (shallow)
@@ -85,35 +85,39 @@ jobs:
           chmod 600 ~/.ssh/id_ec2
           ssh-keyscan -H "${{ steps.ec2.outputs.host }}" >> ~/.ssh/known_hosts
 
-      - name: Update running container
+      - name: Update running container (simple, no heredocs)
         env:
           HOST: ${{ steps.ec2.outputs.host }}
         run: |
-          try_ssh() {
-            local USER=$1
-            ssh -o StrictHostKeyChecking=yes -i ~/.ssh/id_ec2 "${USER}@${HOST}" "bash -s" <<'REMOTE'
-              set -euo pipefail
-              sudo mkdir -p "${COMPOSE_DIR}"
-              sudo chown -R "$USER":"$USER" "${COMPOSE_DIR}"
-              cd "${COMPOSE_DIR}"
-
-              if [ ! -d .git ]; then
-                git clone --depth=1 https://github.com/donzpixelz/simple-web-demo .
-              else
-                git fetch --depth=1 origin main
-                git reset --hard origin/main
-              fi
-
-              docker compose pull "${SERVICE_NAME}" || true
-              docker compose build "${SERVICE_NAME}" || true
-              docker compose up -d --no-deps "${SERVICE_NAME}"
-              docker image prune -f >/dev/null 2>&1 || true
-  REMOTE
-  }
-
-  if ! try_ssh ubuntu; then
-  echo "ubuntu user failed; trying ec2-user..."
-  try_ssh ec2-user
+          set -e
+          # write deploy script locally (will be copied to the server)
+          cat > /tmp/deploy.sh <<'SCRIPT'
+          set -euo pipefail
+          # Expect COMPOSE_DIR and SERVICE_NAME set in the ssh command env
+          sudo mkdir -p "${COMPOSE_DIR}"
+          cd "${COMPOSE_DIR}"
+          if [ ! -d .git ]; then
+            git clone --depth=1 https://github.com/donzpixelz/simple-web-demo .
+          else
+            git fetch --depth=1 origin main
+            git reset --hard origin/main
+          fi
+          # works whether compose uses 'image:' or 'build:'
+          docker compose pull "${SERVICE_NAME}" || true
+          docker compose build "${SERVICE_NAME}" || true
+          docker compose up -d --no-deps "${SERVICE_NAME}"
+          docker image prune -f >/dev/null 2>&1 || true
+  SCRIPT
+  chmod +x /tmp/deploy.sh
+  
+  # try ubuntu first; if scp fails, try ec2-user
+  if scp -i ~/.ssh/id_ec2 -o StrictHostKeyChecking=yes /tmp/deploy.sh "ubuntu@${HOST}:/tmp/deploy.sh" 2>/dev/null; then
+  ssh -i ~/.ssh/id_ec2 -o StrictHostKeyChecking=yes "ubuntu@${HOST}" \
+  "COMPOSE_DIR='${COMPOSE_DIR}' SERVICE_NAME='${SERVICE_NAME}' bash /tmp/deploy.sh"
+  else
+  scp -i ~/.ssh/id_ec2 -o StrictHostKeyChecking=yes /tmp/deploy.sh "ec2-user@${HOST}:/tmp/deploy.sh"
+  ssh -i ~/.ssh/id_ec2 -o StrictHostKeyChecking=yes "ec2-user@${HOST}" \
+  "COMPOSE_DIR='${COMPOSE_DIR}' SERVICE_NAME='${SERVICE_NAME}' bash /tmp/deploy.sh"
   fi
 
 - name: Smoke test
