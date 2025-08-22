@@ -3,11 +3,11 @@
 A minimal, portfolio-friendly project that ties together **Terraform**, **Docker**, and **GitHub Actions**.
 
 ## What this project proves
-- **Terraform**: Provisions a tiny DigitalOcean Droplet via Infrastructure as Code.
+- **Terraform**: Provisions a tiny AWS Instance via Infrastructure as Code.
 - **Docker**: Packages a static web page into a reproducible container.
 - **GitHub Actions**: Builds & pushes the image on every `main` push and triggers Terraform to (re)deploy it.
 
-> You can adapt this for AWS/GCP if you prefer. DigitalOcean is chosen for simplicity.
+> You can adapt this for cloud service providers.
 
 ---
 
@@ -27,11 +27,11 @@ A minimal, portfolio-friendly project that ties together **Terraform**, **Docker
 
 ---
 
-## Cloud Deploy with Terraform (DigitalOcean example)
+## Cloud Deploy with Terraform (AWS Example)
 
 ### Prerequisites
-- DigitalOcean account with an API token
-- An SSH key added to your DO account (we use its **fingerprint**)
+- AWS Account
+- An SSH key added to your AWS account (we use its **fingerprint**)
 - Docker Hub account
 
 ### One-time setup (locally)
@@ -88,7 +88,7 @@ simple-web-demo/
 ├── app/                # Static site content
 │   └── index.html
 ├── Dockerfile          # Container definition
-├── terraform/          # IaC for the droplet + user-data
+├── terraform/          # IaC for the instance + user-data
 │   ├── main.tf
 │   └── variables.tf
 ├── .github/
