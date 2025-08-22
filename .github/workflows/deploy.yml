@@ -26,6 +26,7 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Only run when app/**, nginx conf, or workflow changed
       - name: Detect changed paths
         id: changes
         uses: dorny/paths-filter@v3
@@ -44,6 +45,7 @@ jobs:
           echo "No app/ or nginx conf changes; skipping deploy."
           exit 0
 
+      # AWS creds to find instance & edit SG temporarily
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -69,12 +71,14 @@ jobs:
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "sg_ids=$SG_IDS" >> "$GITHUB_OUTPUT"
 
+      # Temporarily allow this GitHub runner to SSH (port 22)
       - name: Authorize runner IP for SSH (temp)
         id: sshopen
         shell: bash
         run: |
           set -euo pipefail
           RUNNER_IP=$(curl -s https://checkip.amazonaws.com | tr -d '\n')
+          echo "Runner IP: $RUNNER_IP"
           for SG in ${{ steps.ec2.outputs.sg_ids }}; do
             aws ec2 authorize-security-group-ingress \
               --group-id "$SG" \
@@ -83,18 +87,17 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      - name: Prep server (docker + nginx with bind-mounts)
+      # 1) Ensure Docker + folders; fix any bad default.conf path
+      - name: Prepare server (docker + dirs)
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
           username: ec2-user
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
           script: |
-            set -euo pipefail
+            set -euxo pipefail
             WEB_ROOT="${{ env.WEB_ROOT }}"
             CONF_DIR="${{ env.CONF_DIR }}"
-            CONTAINER="${{ env.CONTAINER }}"
-            PORT="${{ env.PORT }}"
 
             if ! command -v docker >/dev/null 2>&1; then
               curl -fsSL https://get.docker.com | sh
@@ -103,56 +106,22 @@ jobs:
 
             sudo mkdir -p "${WEB_ROOT}"
             sudo mkdir -p "${CONF_DIR}"
-            sudo chown -R "$USER:$USER" /opt/simple-web-demo
-
-            recreate=no
-            if sudo docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
-              HTML_SRC=$(sudo docker inspect -f '{{range .Mounts}}{{if eq .Destination "/usr/share/nginx/html"}}{{.Source}}{{end}}{{end}}' "${CONTAINER}" || true)
-              CONF_SRC=$(sudo docker inspect -f '{{range .Mounts}}{{if eq .Destination "/etc/nginx/conf.d"}}{{.Source}}{{end}}{{end}}' "${CONTAINER}" || true)
-              if [ "${HTML_SRC}" != "${WEB_ROOT}" ] || [ "${CONF_SRC}" != "${CONF_DIR}" ]; then
-                recreate=yes
-              fi
-            else
-              recreate=yes
-            fi
-
-            if [ "$recreate" = "yes" ]; then
-              sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
-              sudo docker run -d --name "${CONTAINER}" \
-                -p ${PORT}:80 \
-                -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
-                -v "${CONF_DIR}":/etc/nginx/conf.d:ro \
-                --restart unless-stopped \
-                nginx:alpine
-            else
-              sudo docker start "${CONTAINER}" >/dev/null 2>&1 || true
-            fi
-
-      # Ensure default.conf is not a directory; then upload the file
-      - name: Fix conf path and upload nginx/default.conf
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ steps.ec2.outputs.host }}
-          username: ec2-user
-          key: ${{ secrets.AWS_EC2_SSH_KEY }}
-          script: |
-            set -euo pipefail
-            CONF_DIR="${{ env.CONF_DIR }}"
-            # If someone accidentally created a directory at default.conf, remove it
+            # if someone accidentally created a directory at default.conf, remove it
             if [ -d "${CONF_DIR}/default.conf" ]; then
               sudo rm -rf "${CONF_DIR}/default.conf"
             fi
-            sudo mkdir -p "${CONF_DIR}"
-            sudo chown -R "$USER:$USER" "${CONF_DIR}"
+            sudo chown -R "$USER:$USER" /opt/simple-web-demo
 
-      - name: Upload nginx/default.conf (as file)
+      # 2) Upload config and app content (flatten app/)
+      - name: Upload nginx/default.conf
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ steps.ec2.outputs.host }}
           username: ec2-user
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
           source: "nginx/default.conf"
-          target: "${{ env.CONF_DIR }}/"   # copy into the directory (keeps filename)
+          target: "${{ env.CONF_DIR }}/"
+          overwrite: true
 
       - name: Upload app/ to server
         uses: appleboy/scp-action@v0.1.7
@@ -164,20 +133,38 @@ jobs:
           target: "${{ env.WEB_ROOT }}/"
           strip_components: 1
 
-      - name: Reload nginx and show served files
+      # 3) Recreate container with both mounts, then validate nginx
+      - name: Recreate container and validate nginx
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
           username: ec2-user
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
           script: |
-            set -euo pipefail
+            set -euxo pipefail
+            WEB_ROOT="${{ env.WEB_ROOT }}"
+            CONF_DIR="${{ env.CONF_DIR }}"
             CONTAINER="${{ env.CONTAINER }}"
+            PORT="${{ env.PORT }}"
+
+            # Recreate the container to guarantee correct mounts & fresh config
+            sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+            sudo docker run -d --name "${CONTAINER}" \
+              -p ${PORT}:80 \
+              -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
+              -v "${CONF_DIR}":/etc/nginx/conf.d:ro \
+              --restart unless-stopped \
+              nginx:alpine
+
+            # Give it a moment, then test config and show status/logs
+            sleep 2
             sudo docker exec "${CONTAINER}" nginx -t
-            sudo docker exec "${CONTAINER}" nginx -s reload || true
+            sudo docker ps --filter "name=${CONTAINER}"
+            sudo docker logs --tail 50 "${CONTAINER}" || true
             echo "--- Served files ---"
             sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | sed -n "1,200p"'
 
+      # Remove the temporary SSH ingress
       - name: Revoke runner IP for SSH (cleanup)
         if: always()
         shell: bash
@@ -193,6 +180,7 @@ jobs:
             done
           fi
 
+      # 4) Smoke test (connect to :8080)
       - name: Smoke test
         env:
           HOST: ${{ steps.ec2.outputs.host }}
