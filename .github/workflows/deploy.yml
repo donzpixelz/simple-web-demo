@@ -37,6 +37,7 @@ jobs:
               - 'app/**'
             docker:
               - 'Dockerfile'
+              - 'docker-compose.yml'
               - '.github/workflows/deploy.yml'
 
       - name: Log in to Docker Hub
@@ -56,8 +57,9 @@ jobs:
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
           provenance: false
+          no-cache: true
 
-      # Configure AWS creds (needed for Terraform and EC2 queries)
+      # Configure AWS creds (needed for EC2 queries and optional Terraform)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -120,7 +122,7 @@ jobs:
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
       # ---- Deploy over SSH as ec2-user (auto-install git + docker + compose) ----
-      - name: Deploy via SSH (build/pull + restart)
+      - name: Deploy via SSH (pin to commit SHA)
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -130,6 +132,8 @@ jobs:
             set -euo pipefail
             COMPOSE_DIR="${{ env.COMPOSE_DIR }}"
             SERVICE_NAME="${{ env.SERVICE_NAME }}"
+            IMAGE_NAME="${{ env.IMAGE_NAME }}"
+            IMAGE_TAG="${{ github.sha }}"
 
             # Install git if missing
             if ! command -v git >/dev/null 2>&1; then
@@ -173,6 +177,7 @@ jobs:
             sudo chown -R "$USER:$USER" "${COMPOSE_DIR}"
             cd "${COMPOSE_DIR}"
 
+            # Sync repo (for docker-compose.yml)
             if [ ! -d .git ]; then
               git clone --depth=1 https://github.com/donzpixelz/simple-web-demo .
             else
@@ -180,14 +185,21 @@ jobs:
               git reset --hard origin/main
             fi
 
-            # Clean up any existing container (due to container_name=simple-web-demo)
+            # Write .env so compose uses the SHA tag (unique per deploy)
+            cat > .env <<EOF
+            IMAGE_NAME=${IMAGE_NAME}
+            IMAGE_TAG=${IMAGE_TAG}
+            EOF
+
+            # Clean up any existing container (name conflict)
             $DC rm -f -s "${SERVICE_NAME}" || true
             sudo docker rm -f simple-web-demo || true
 
-            # Works for either 'image:' or 'build:' in docker-compose.yml
-            $DC pull "${SERVICE_NAME}" || true
-            $DC build "${SERVICE_NAME}" || true
+            # Pull the exact image for this commit and restart only the service
+            sudo docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
             $DC up -d --no-deps "${SERVICE_NAME}"
+
+            # Optional cleanup
             sudo docker image prune -f >/dev/null 2>&1 || true
 
       # ---- Revoke the temporary SSH ingress ----

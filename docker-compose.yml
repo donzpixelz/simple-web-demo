@@ -1,8 +1,8 @@
 services:
   web:
-    image: chipsterz/simple-web-demo:latest   # pull the image built by GitHub Actions
+    image: ${IMAGE_NAME}:${IMAGE_TAG}   # resolved from .env written by the workflow
     container_name: simple-web-demo
     ports:
       - "8080:80"
     restart: unless-stopped
-    pull_policy: always                       # always pull latest on restart
+    pull_policy: always
