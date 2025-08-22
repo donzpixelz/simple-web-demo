@@ -13,12 +13,12 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      AWS_REGION: us-east-2                 # your region
-      EC2_KEY_NAME: simple-web-demo-key     # your EC2 key pair name
-      WEB_ROOT: /opt/simple-web-demo/app    # files served on server
+      AWS_REGION: us-east-2
+      EC2_KEY_NAME: simple-web-demo-key
+      WEB_ROOT: /opt/simple-web-demo/app
       CONF_DIR: /opt/simple-web-demo/nginx/conf.d
-      CONTAINER: simple-web-demo            # nginx container name
-      PORT: "8080"                          # public port
+      CONTAINER: simple-web-demo
+      PORT: "8080"
 
     steps:
       - name: Checkout (shallow)
@@ -26,7 +26,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      # Only run when app/** or this workflow or nginx conf changed
       - name: Detect changed paths
         id: changes
         uses: dorny/paths-filter@v3
@@ -45,7 +44,6 @@ jobs:
           echo "No app/ or nginx conf changes; skipping deploy."
           exit 0
 
-      # AWS creds to find instance & edit SG temporarily
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -71,14 +69,12 @@ jobs:
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "sg_ids=$SG_IDS" >> "$GITHUB_OUTPUT"
 
-      # Temporarily allow this GitHub runner to SSH (port 22)
       - name: Authorize runner IP for SSH (temp)
         id: sshopen
         shell: bash
         run: |
           set -euo pipefail
           RUNNER_IP=$(curl -s https://checkip.amazonaws.com | tr -d '\n')
-          echo "Runner IP: $RUNNER_IP"
           for SG in ${{ steps.ec2.outputs.sg_ids }}; do
             aws ec2 authorize-security-group-ingress \
               --group-id "$SG" \
@@ -87,7 +83,6 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # Ensure docker; ensure correct container with BOTH mounts (html + conf.d)
       - name: Prep server (docker + nginx with bind-mounts)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -101,13 +96,11 @@ jobs:
             CONTAINER="${{ env.CONTAINER }}"
             PORT="${{ env.PORT }}"
 
-            # Install docker if missing
             if ! command -v docker >/dev/null 2>&1; then
               curl -fsSL https://get.docker.com | sh
               sudo systemctl enable --now docker
             fi
 
-            # Ensure target directories exist and are writable by ec2-user
             sudo mkdir -p "${WEB_ROOT}"
             sudo mkdir -p "${CONF_DIR}"
             sudo chown -R "$USER:$USER" /opt/simple-web-demo
@@ -135,18 +128,32 @@ jobs:
               sudo docker start "${CONTAINER}" >/dev/null 2>&1 || true
             fi
 
-      # Upload nginx config (no-cache headers)
-      - name: Upload nginx/default.conf
+      # Ensure default.conf is not a directory; then upload the file
+      - name: Fix conf path and upload nginx/default.conf
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ steps.ec2.outputs.host }}
+          username: ec2-user
+          key: ${{ secrets.AWS_EC2_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            CONF_DIR="${{ env.CONF_DIR }}"
+            # If someone accidentally created a directory at default.conf, remove it
+            if [ -d "${CONF_DIR}/default.conf" ]; then
+              sudo rm -rf "${CONF_DIR}/default.conf"
+            fi
+            sudo mkdir -p "${CONF_DIR}"
+            sudo chown -R "$USER:$USER" "${CONF_DIR}"
+
+      - name: Upload nginx/default.conf (as file)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ steps.ec2.outputs.host }}
           username: ec2-user
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
           source: "nginx/default.conf"
-          target: "${{ env.CONF_DIR }}/default.conf"
-          overwrite: true
+          target: "${{ env.CONF_DIR }}/"   # copy into the directory (keeps filename)
 
-      # Copy ONLY the contents of app/ into WEB_ROOT
       - name: Upload app/ to server
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -157,7 +164,6 @@ jobs:
           target: "${{ env.WEB_ROOT }}/"
           strip_components: 1
 
-      # Reload nginx and show file listing
       - name: Reload nginx and show served files
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -172,7 +178,6 @@ jobs:
             echo "--- Served files ---"
             sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | sed -n "1,200p"'
 
-      # Remove the temporary SSH ingress
       - name: Revoke runner IP for SSH (cleanup)
         if: always()
         shell: bash
@@ -188,7 +193,6 @@ jobs:
             done
           fi
 
-      # Quick smoke test with cache-bust
       - name: Smoke test
         env:
           HOST: ${{ steps.ec2.outputs.host }}
