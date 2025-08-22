@@ -25,7 +25,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      # Only run when app/** changed (or this workflow changed)
+      # Only run when app/** (or this workflow) changed
       - name: Detect changed paths
         id: changes
         uses: dorny/paths-filter@v3
@@ -42,7 +42,7 @@ jobs:
           echo "No app/ changes; skipping deploy."
           exit 0
 
-      # AWS needed to discover instance & manage SG temporarily
+      # AWS creds to find instance & edit SG temporarily
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -50,7 +50,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Find your running instance created with this key pair
       - name: Find EC2 host & SGs
         id: ec2
         shell: bash
@@ -69,7 +68,7 @@ jobs:
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "sg_ids=$SG_IDS" >> "$GITHUB_OUTPUT"
 
-      # Allow this GitHub runner to SSH (port 22) temporarily
+      # Temporarily allow this GitHub runner to SSH (port 22)
       - name: Authorize runner IP for SSH (temp)
         id: sshopen
         shell: bash
@@ -85,7 +84,7 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # Prepare the server once (install docker, create dir, start nginx container with a bind mount)
+      # One-time prep on server: docker + nginx container with bind mount
       - name: One-time prep on server (docker + nginx container)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -108,7 +107,7 @@ jobs:
             sudo mkdir -p "${WEB_ROOT}"
             sudo chown -R "$USER:$USER" "$(dirname "${WEB_ROOT}")"
 
-            # If container doesn't exist, create it with a bind mount to WEB_ROOT
+            # Start nginx container with bind mount if it doesn't exist
             if ! sudo docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
               sudo docker run -d --name "${CONTAINER}" \
                 -p ${PORT}:80 \
@@ -120,19 +119,17 @@ jobs:
               sudo docker start "${CONTAINER}" >/dev/null 2>&1 || true
             fi
 
-      # Copy only changed app/ files to the server
+      # Copy only changed app/ files to the server (recursive)
       - name: Upload app/ to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ steps.ec2.outputs.host }}
           username: ec2-user
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
-          source: "app/*"
+          source: "app/**"
           target: "${{ env.WEB_ROOT }}/"
-          overwrite: true
-          strip_components: 1
 
-      # Reload nginx so it picks up new files (no container restart required)
+      # Reload nginx so it serves the new files (no downtime)
       - name: Reload nginx (no-downtime)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -142,19 +139,18 @@ jobs:
           script: |
             set -euo pipefail
             CONTAINER="${{ env.CONTAINER }}"
-            # Try graceful reload; fallback to HUP
-            sudo docker exec "${CONTAINER}" nginx -s reload || sudo docker kill -s HUP "${CONTAINER}" || true
-            # Show what we serve now
-            sudo docker exec "${CONTAINER}" sh -c 'ls -la /usr/share/nginx/html | tail -n +1'
+            # Graceful reload; if nginx -s reload isn't available, HUP the pid
+            sudo docker exec "${CONTAINER}" nginx -s reload || true
+            # List current files being served (for visibility)
+            sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | tail -n +1'
 
-      # Clean up SSH ingress rule
+      # Remove the temporary SSH ingress
       - name: Revoke runner IP for SSH (cleanup)
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          RUNNER_IP="${{ steps.sshop en.outputs.runner_ip }}"
-          RUNNER_IP="${RUNNER_IP:-${{ steps.sshopen.outputs.runner_ip }}}"
+          RUNNER_IP="${{ steps.sshopen.outputs.runner_ip }}"
           if [[ -n "$RUNNER_IP" ]]; then
             for SG in ${{ steps.ec2.outputs.sg_ids }}; do
               aws ec2 revoke-security-group-ingress \
