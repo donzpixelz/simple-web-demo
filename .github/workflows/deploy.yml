@@ -1,4 +1,4 @@
-name: Deploy static app to EC2 (push-only app/)
+name: Deploy static app to EC2 (push-only app/ with no-cache)
 
 on:
   push:
@@ -15,7 +15,8 @@ jobs:
     env:
       AWS_REGION: us-east-2                 # your region
       EC2_KEY_NAME: simple-web-demo-key     # your EC2 key pair name
-      WEB_ROOT: /opt/simple-web-demo/app    # where files live on server
+      WEB_ROOT: /opt/simple-web-demo/app    # files served on server
+      CONF_DIR: /opt/simple-web-demo/nginx/conf.d
       CONTAINER: simple-web-demo            # nginx container name
       PORT: "8080"                          # public port
 
@@ -25,7 +26,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      # Only run when app/** (or this workflow) changed
+      # Only run when app/** or this workflow or nginx conf changed
       - name: Detect changed paths
         id: changes
         uses: dorny/paths-filter@v3
@@ -33,13 +34,15 @@ jobs:
           filters: |
             app:
               - 'app/**'
+            conf:
+              - 'nginx/default.conf'
             workflow:
               - '.github/workflows/deploy.yml'
 
-      - name: Stop early if no app changes
-        if: steps.changes.outputs.app != 'true' && steps.changes.outputs.workflow != 'true'
+      - name: Stop early if nothing relevant changed
+        if: steps.changes.outputs.app != 'true' && steps.changes.outputs.conf != 'true' && steps.changes.outputs.workflow != 'true'
         run: |
-          echo "No app/ changes; skipping deploy."
+          echo "No app/ or nginx conf changes; skipping deploy."
           exit 0
 
       # AWS creds to find instance & edit SG temporarily
@@ -84,8 +87,8 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # One-time prep on server: ensure docker + recreate container WITH bind-mount if needed
-      - name: Prep server (docker + correct nginx bind-mount)
+      # Ensure docker; ensure correct container with BOTH mounts (html + conf.d)
+      - name: Prep server (docker + nginx with bind-mounts)
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -94,6 +97,7 @@ jobs:
           script: |
             set -euo pipefail
             WEB_ROOT="${{ env.WEB_ROOT }}"
+            CONF_DIR="${{ env.CONF_DIR }}"
             CONTAINER="${{ env.CONTAINER }}"
             PORT="${{ env.PORT }}"
 
@@ -103,35 +107,47 @@ jobs:
               sudo systemctl enable --now docker
             fi
 
-            # Ensure target directory exists and is writable by ec2-user
+            # Ensure target directories exist and are writable by ec2-user
             sudo mkdir -p "${WEB_ROOT}"
-            sudo chown -R "$USER:$USER" "$(dirname "${WEB_ROOT}")"
+            sudo mkdir -p "${CONF_DIR}"
+            sudo chown -R "$USER:$USER" /opt/simple-web-demo
 
-            # If container exists, check its mount; recreate if wrong
+            recreate=no
             if sudo docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
-              MOUNT_SRC=$(sudo docker inspect -f '{{range .Mounts}}{{if eq .Destination "/usr/share/nginx/html"}}{{.Source}}{{end}}{{end}}' "${CONTAINER}" || true)
-              if [ "${MOUNT_SRC}" != "${WEB_ROOT}" ]; then
-                echo "Recreating ${CONTAINER} with correct bind-mount..."
-                sudo docker rm -f "${CONTAINER}" || true
-                sudo docker run -d --name "${CONTAINER}" \
-                  -p ${PORT}:80 \
-                  -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
-                  --restart unless-stopped \
-                  nginx:alpine
-              else
-                sudo docker start "${CONTAINER}" >/dev/null 2>&1 || true
+              HTML_SRC=$(sudo docker inspect -f '{{range .Mounts}}{{if eq .Destination "/usr/share/nginx/html"}}{{.Source}}{{end}}{{end}}' "${CONTAINER}" || true)
+              CONF_SRC=$(sudo docker inspect -f '{{range .Mounts}}{{if eq .Destination "/etc/nginx/conf.d"}}{{.Source}}{{end}}{{end}}' "${CONTAINER}" || true)
+              if [ "${HTML_SRC}" != "${WEB_ROOT}" ] || [ "${CONF_SRC}" != "${CONF_DIR}" ]; then
+                recreate=yes
               fi
             else
-              # Start nginx container with correct bind mount
+              recreate=yes
+            fi
+
+            if [ "$recreate" = "yes" ]; then
+              sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
               sudo docker run -d --name "${CONTAINER}" \
                 -p ${PORT}:80 \
                 -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
+                -v "${CONF_DIR}":/etc/nginx/conf.d:ro \
                 --restart unless-stopped \
                 nginx:alpine
+            else
+              sudo docker start "${CONTAINER}" >/dev/null 2>&1 || true
             fi
 
-      # Copy ONLY the app/ contents (not the 'app' folder itself) into WEB_ROOT
-      - name: Upload app/ to server (flatten one level)
+      # Upload nginx config (no-cache headers)
+      - name: Upload nginx/default.conf
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.ec2.outputs.host }}
+          username: ec2-user
+          key: ${{ secrets.AWS_EC2_SSH_KEY }}
+          source: "nginx/default.conf"
+          target: "${{ env.CONF_DIR }}/default.conf"
+          overwrite: true
+
+      # Copy ONLY the contents of app/ into WEB_ROOT
+      - name: Upload app/ to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -141,7 +157,7 @@ jobs:
           target: "${{ env.WEB_ROOT }}/"
           strip_components: 1
 
-      # List files being served + force nginx to re-open files (reload)
+      # Reload nginx and show file listing
       - name: Reload nginx and show served files
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -151,8 +167,10 @@ jobs:
           script: |
             set -euo pipefail
             CONTAINER="${{ env.CONTAINER }}"
-            sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | sed -n "1,200p"'
+            sudo docker exec "${CONTAINER}" nginx -t
             sudo docker exec "${CONTAINER}" nginx -s reload || true
+            echo "--- Served files ---"
+            sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | sed -n "1,200p"'
 
       # Remove the temporary SSH ingress
       - name: Revoke runner IP for SSH (cleanup)
