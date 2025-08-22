@@ -39,6 +39,14 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
           provenance: false
 
+      # 🔐 Configure AWS creds BEFORE Terraform so the provider has them
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
@@ -54,14 +62,7 @@ jobs:
             -var "dockerhub_username=${{ secrets.DOCKERHUB_USERNAME }}" \
             -var "docker_image=${{ env.IMAGE_NAME }}:latest"
 
-      # --- Discover current EC2 host dynamically in us-east-2 ---
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
+      # 🔎 Discover current EC2 host dynamically in us-east-2
       - name: Find EC2 public DNS by key name
         id: ec2
         shell: bash
@@ -76,6 +77,7 @@ jobs:
           fi
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
 
+      # 🚀 Deploy via SSH (uses ec2-user)
       - name: Deploy via SSH (build/pull + restart)
         uses: appleboy/ssh-action@v1.0.0
         with:
