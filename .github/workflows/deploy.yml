@@ -14,8 +14,8 @@ jobs:
 
     env:
       IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/simple-web-demo
-      AWS_REGION: us-east-2              # your region
-      EC2_KEY_NAME: simple-web-demo-key  # your EC2 key pair name
+      AWS_REGION: us-east-2
+      EC2_KEY_NAME: simple-web-demo-key
       COMPOSE_DIR: /opt/simple-web-demo
       SERVICE_NAME: web
 
@@ -119,7 +119,7 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # ---- Deploy over SSH as ec2-user ----
+      # ---- Deploy over SSH as ec2-user (auto-install git + docker if missing) ----
       - name: Deploy via SSH (build/pull + restart)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -130,6 +130,31 @@ jobs:
             set -euo pipefail
             COMPOSE_DIR="${{ env.COMPOSE_DIR }}"
             SERVICE_NAME="${{ env.SERVICE_NAME }}"
+
+            # Install git if missing
+            if ! command -v git >/dev/null 2>&1; then
+              if command -v yum >/dev/null 2>&1; then
+                sudo yum install -y git
+              elif command -v dnf >/dev/null 2>&1; then
+                sudo dnf install -y git
+              elif command -v apt-get >/dev/null 2>&1; then
+                sudo apt-get update -y
+                sudo apt-get install -y git
+              fi
+            fi
+
+            # Install Docker if missing (and start it)
+            if ! command -v docker >/dev/null 2>&1; then
+              curl -fsSL https://get.docker.com | sh
+              sudo systemctl enable --now docker
+            fi
+
+            # Ensure docker compose v2 available
+            if ! docker compose version >/dev/null 2>&1; then
+              if command -v apt-get >/dev/null 2>&1; then
+                sudo apt-get install -y docker-compose-plugin || true
+              fi
+            fi
 
             sudo mkdir -p "${COMPOSE_DIR}"
             sudo chown -R "$USER:$USER" "${COMPOSE_DIR}"
@@ -143,10 +168,10 @@ jobs:
             fi
 
             # Works for either 'image:' or 'build:' in docker-compose.yml
-            docker compose pull "${SERVICE_NAME}" || true
-            docker compose build "${SERVICE_NAME}" || true
-            docker compose up -d --no-deps "${SERVICE_NAME}"
-            docker image prune -f >/dev/null 2>&1 || true
+            sudo docker compose pull "${SERVICE_NAME}" || true
+            sudo docker compose build "${SERVICE_NAME}" || true
+            sudo docker compose up -d --no-deps "${SERVICE_NAME}"
+            sudo docker image prune -f >/dev/null 2>&1 || true
 
       # ---- Revoke the temporary SSH ingress ----
       - name: Revoke runner IP for SSH (cleanup)
