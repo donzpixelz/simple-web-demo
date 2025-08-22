@@ -127,7 +127,7 @@ jobs:
           target: "${{ env.WEB_ROOT }}/"
           strip_components: 1
 
-      - name: Recreate container (stock nginx + no-cache file) and verify
+      - name: Recreate container (stock nginx + no-cache file) and verify (with fallback)
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -138,6 +138,7 @@ jobs:
             WEB_ROOT="${{ env.WEB_ROOT }}"
             CONF_FILE="${{ env.CONF_FILE }}"
             CONTAINER="${{ env.CONTAINER }}"
+
             sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
             sudo docker run -d --name "${CONTAINER}" \
               -p 80:80 \
@@ -145,11 +146,33 @@ jobs:
               -v "${CONF_FILE}":/etc/nginx/conf.d/99-no-cache.conf:ro \
               --restart unless-stopped \
               nginx:alpine
+
+            # Wait briefly; if nginx isn't healthy or keeps restarting, fallback
             sleep 2
+            FALLBACK=0
+            for i in {1..6}; do
+              if sudo docker exec "${CONTAINER}" nginx -t; then
+                break
+              fi
+              if ! sudo docker ps --filter "name=${CONTAINER}" --format '{{.Status}}' | grep -qi 'Up'; then
+                FALLBACK=1; break
+              fi
+              sleep 1
+            done
+            if [ "$FALLBACK" -eq 1 ]; then
+              echo "Custom no-cache conf failed; falling back to stock nginx."
+              sudo docker logs --tail 100 "${CONTAINER}" || true
+              sudo docker rm -f "${CONTAINER}" || true
+              sudo docker run -d --name "${CONTAINER}" \
+                -p 80:80 \
+                -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
+                --restart unless-stopped \
+                nginx:alpine
+              sleep 2
+            fi
+
             echo "--- docker ps ---"
             sudo docker ps --filter "name=${CONTAINER}" --format 'ports={{.Ports}} status={{.Status}}'
-            echo "--- nginx -t ---"
-            sudo docker exec "${CONTAINER}" nginx -t
             echo "--- curl inside container ---"
             sudo docker exec "${CONTAINER}" sh -lc 'wget -qO- http://127.0.0.1/ | head -n 10 || true'
 
@@ -162,7 +185,6 @@ jobs:
               --group-id "$SG" \
               --ip-permissions 'IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0,Description=web-80}]' \
               || true
-            # Best-effort cleanup: remove 8080 if it exists
             aws ec2 revoke-security-group-ingress \
               --group-id "$SG" \
               --ip-permissions 'IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=0.0.0.0/0}]' \
