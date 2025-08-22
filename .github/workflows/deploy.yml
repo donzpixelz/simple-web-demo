@@ -1,4 +1,4 @@
-name: Deploy static app to EC2 (push-only app/, stock nginx)
+name: Deploy static app to EC2 (push-only app/, stock nginx, port 80 + no-cache)
 
 on:
   push:
@@ -16,6 +16,7 @@ jobs:
       AWS_REGION: us-east-2
       EC2_KEY_NAME: simple-web-demo-key
       WEB_ROOT: /opt/simple-web-demo/app
+      CONF_FILE: /opt/simple-web-demo/nginx/99-no-cache.conf
       CONTAINER: simple-web-demo
 
     steps:
@@ -31,13 +32,15 @@ jobs:
           filters: |
             app:
               - 'app/**'
+            conf:
+              - 'nginx/99-no-cache.conf'
             workflow:
               - '.github/workflows/deploy.yml'
 
       - name: Stop early if nothing relevant changed
-        if: steps.changes.outputs.app != 'true' && steps.changes.outputs.workflow != 'true'
+        if: steps.changes.outputs.app != 'true' && steps.changes.outputs.conf != 'true' && steps.changes.outputs.workflow != 'true'
         run: |
-          echo "No app/ changes; skipping deploy."
+          echo "No app/ or nginx conf changes; skipping deploy."
           exit 0
 
       - name: Configure AWS credentials
@@ -90,6 +93,7 @@ jobs:
           script: |
             set -euxo pipefail
             WEB_ROOT="${{ env.WEB_ROOT }}"
+            CONF_FILE="${{ env.CONF_FILE }}"
             if ! command -v docker >/dev/null 2>&1; then
               curl -fsSL https://get.docker.com | sh
             fi
@@ -100,7 +104,18 @@ jobs:
             done
             sudo docker info >/dev/null
             sudo mkdir -p "${WEB_ROOT}"
+            sudo mkdir -p "$(dirname "${CONF_FILE}")"
             sudo chown -R "$USER:$USER" /opt/simple-web-demo
+
+      - name: Upload nginx/99-no-cache.conf (single file)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.ec2.outputs.host }}
+          username: ec2-user
+          key: ${{ secrets.AWS_EC2_SSH_KEY }}
+          source: "nginx/99-no-cache.conf"
+          target: "${{ env.CONF_FILE }}"
+          overwrite: true
 
       - name: Upload app/ to server (flatten contents)
         uses: appleboy/scp-action@v0.1.7
@@ -112,7 +127,7 @@ jobs:
           target: "${{ env.WEB_ROOT }}/"
           strip_components: 1
 
-      - name: Recreate container (stock nginx) and verify
+      - name: Recreate container (stock nginx + no-cache file) and verify
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -121,22 +136,24 @@ jobs:
           script: |
             set -euxo pipefail
             WEB_ROOT="${{ env.WEB_ROOT }}"
+            CONF_FILE="${{ env.CONF_FILE }}"
             CONTAINER="${{ env.CONTAINER }}"
             sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
             sudo docker run -d --name "${CONTAINER}" \
-              -p 80:80 -p 8080:80 \
+              -p 80:80 \
               -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
+              -v "${CONF_FILE}":/etc/nginx/conf.d/99-no-cache.conf:ro \
               --restart unless-stopped \
               nginx:alpine
             sleep 2
             echo "--- docker ps ---"
             sudo docker ps --filter "name=${CONTAINER}" --format 'ports={{.Ports}} status={{.Status}}'
-            echo "--- served files ---"
-            sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | sed -n "1,200p"'
+            echo "--- nginx -t ---"
+            sudo docker exec "${CONTAINER}" nginx -t
             echo "--- curl inside container ---"
             sudo docker exec "${CONTAINER}" sh -lc 'wget -qO- http://127.0.0.1/ | head -n 10 || true'
 
-      - name: Ensure SG allows TCP/80 and /8080 from 0.0.0.0/0
+      - name: Ensure SG allows TCP/80 from 0.0.0.0/0 (and try to remove 8080)
         shell: bash
         run: |
           set -euo pipefail
@@ -145,9 +162,10 @@ jobs:
               --group-id "$SG" \
               --ip-permissions 'IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0,Description=web-80}]' \
               || true
-            aws ec2 authorize-security-group-ingress \
+            # Best-effort cleanup: remove 8080 if it exists
+            aws ec2 revoke-security-group-ingress \
               --group-id "$SG" \
-              --ip-permissions 'IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=0.0.0.0/0,Description=web-8080}]' \
+              --ip-permissions 'IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=0.0.0.0/0}]' \
               || true
           done
 
@@ -166,16 +184,10 @@ jobs:
             done
           fi
 
-      - name: Smoke test (8080 then 80)
+      - name: Smoke test (port 80)
         env:
           HOST: ${{ steps.ec2.outputs.host }}
         run: |
           set -euo pipefail
-          for URL in "http://${HOST}:8080/" "http://${HOST}/"; do
-            echo "Trying ${URL} ..."
-            if curl -v --retry 4 --retry-connrefused --retry-delay 3 --max-time 20 -fsS "${URL}?nocache=$(date +%s)" >/dev/null; then
-              exit 0
-            fi
-          done
-          echo "Both ports failed"
-          exit 7
+          curl -v --retry 4 --retry-connrefused --retry-delay 3 --max-time 20 \
+            -fsS "http://${HOST}/?nocache=$(date +%s)" >/dev/null
