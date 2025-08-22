@@ -1,4 +1,14 @@
-.terraform/
-.terraform.lock.hcl
-*.pem
-terraform.tfvars
+# macOS
+.DS_Store
+**/.DS_Store
+
+# IDE stuff
+.idea/
+
+# Terraform local state
+terraform.tfstate
+terraform.tfstate.*
+terraform/.terraform/
+
+# Large backup
+repo-backup.bundle
