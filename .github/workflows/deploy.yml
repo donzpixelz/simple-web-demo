@@ -87,7 +87,7 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # 1) Ensure Docker + folders; fix any bad default.conf path
+      # Ensure Docker + dirs; clean bad default.conf dir if it exists
       - name: Prepare server (docker + dirs)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -106,13 +106,13 @@ jobs:
 
             sudo mkdir -p "${WEB_ROOT}"
             sudo mkdir -p "${CONF_DIR}"
-            # if someone accidentally created a directory at default.conf, remove it
+            # If someone accidentally created a directory at default.conf, remove it
             if [ -d "${CONF_DIR}/default.conf" ]; then
               sudo rm -rf "${CONF_DIR}/default.conf"
             fi
             sudo chown -R "$USER:$USER" /opt/simple-web-demo
 
-      # 2) Upload config and app content (flatten app/)
+      # Upload config and app content (flatten app/ contents into WEB_ROOT)
       - name: Upload nginx/default.conf
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -133,7 +133,7 @@ jobs:
           target: "${{ env.WEB_ROOT }}/"
           strip_components: 1
 
-      # 3) Recreate container with both mounts, then validate nginx
+      # Recreate container with both mounts, then validate nginx
       - name: Recreate container and validate nginx
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -147,7 +147,6 @@ jobs:
             CONTAINER="${{ env.CONTAINER }}"
             PORT="${{ env.PORT }}"
 
-            # Recreate the container to guarantee correct mounts & fresh config
             sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
             sudo docker run -d --name "${CONTAINER}" \
               -p ${PORT}:80 \
@@ -156,13 +155,26 @@ jobs:
               --restart unless-stopped \
               nginx:alpine
 
-            # Give it a moment, then test config and show status/logs
+            # Basic checks
             sleep 2
             sudo docker exec "${CONTAINER}" nginx -t
             sudo docker ps --filter "name=${CONTAINER}"
-            sudo docker logs --tail 50 "${CONTAINER}" || true
             echo "--- Served files ---"
             sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | sed -n "1,200p"'
+            echo "--- Curl inside container ---"
+            sudo docker exec "${CONTAINER}" sh -lc 'wget -qO- http://127.0.0.1/ | head -n 5 || true'
+
+      # Ensure inbound 8080 is open on the instance SGs
+      - name: Ensure SG allows TCP/8080 from 0.0.0.0/0
+        shell: bash
+        run: |
+          set -euo pipefail
+          for SG in ${{ steps.ec2.outputs.sg_ids }}; do
+            aws ec2 authorize-security-group-ingress \
+              --group-id "$SG" \
+              --ip-permissions 'IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=0.0.0.0/0,Description=web-8080}]' \
+              || true
+          done
 
       # Remove the temporary SSH ingress
       - name: Revoke runner IP for SSH (cleanup)
@@ -180,10 +192,11 @@ jobs:
             done
           fi
 
-      # 4) Smoke test (connect to :8080)
+      # External smoke test (GitHub -> EC2:8080)
       - name: Smoke test
         env:
           HOST: ${{ steps.ec2.outputs.host }}
           PORT: ${{ env.PORT }}
         run: |
-          curl -fsS --max-time 10 "http://${HOST}:${PORT}/?nocache=$(date +%s)" >/dev/null
+          curl -v --retry 3 --retry-connrefused --retry-delay 2 \
+            -fsS --max-time 15 "http://${HOST}:${PORT}/?nocache=$(date +%s)" >/dev/null
