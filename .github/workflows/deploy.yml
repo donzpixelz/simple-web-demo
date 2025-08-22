@@ -84,8 +84,8 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # One-time prep on server: docker + nginx container with bind mount
-      - name: One-time prep on server (docker + nginx container)
+      # One-time prep on server: ensure docker + recreate container WITH bind-mount if needed
+      - name: Prep server (docker + correct nginx bind-mount)
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -107,20 +107,31 @@ jobs:
             sudo mkdir -p "${WEB_ROOT}"
             sudo chown -R "$USER:$USER" "$(dirname "${WEB_ROOT}")"
 
-            # Start nginx container with bind mount if it doesn't exist
-            if ! sudo docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
+            # If container exists, check its mount; recreate if wrong
+            if sudo docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
+              MOUNT_SRC=$(sudo docker inspect -f '{{range .Mounts}}{{if eq .Destination "/usr/share/nginx/html"}}{{.Source}}{{end}}{{end}}' "${CONTAINER}" || true)
+              if [ "${MOUNT_SRC}" != "${WEB_ROOT}" ]; then
+                echo "Recreating ${CONTAINER} with correct bind-mount..."
+                sudo docker rm -f "${CONTAINER}" || true
+                sudo docker run -d --name "${CONTAINER}" \
+                  -p ${PORT}:80 \
+                  -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
+                  --restart unless-stopped \
+                  nginx:alpine
+              else
+                sudo docker start "${CONTAINER}" >/dev/null 2>&1 || true
+              fi
+            else
+              # Start nginx container with correct bind mount
               sudo docker run -d --name "${CONTAINER}" \
                 -p ${PORT}:80 \
                 -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
                 --restart unless-stopped \
                 nginx:alpine
-            else
-              # Ensure it's running
-              sudo docker start "${CONTAINER}" >/dev/null 2>&1 || true
             fi
 
-      # Copy only changed app/ files to the server (recursive)
-      - name: Upload app/ to server
+      # Copy ONLY the app/ contents (not the 'app' folder itself) into WEB_ROOT
+      - name: Upload app/ to server (flatten one level)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -128,9 +139,10 @@ jobs:
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
           source: "app/**"
           target: "${{ env.WEB_ROOT }}/"
+          strip_components: 1
 
-      # Reload nginx so it serves the new files (no downtime)
-      - name: Reload nginx (no-downtime)
+      # List files being served + force nginx to re-open files (reload)
+      - name: Reload nginx and show served files
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -139,10 +151,8 @@ jobs:
           script: |
             set -euo pipefail
             CONTAINER="${{ env.CONTAINER }}"
-            # Graceful reload; if nginx -s reload isn't available, HUP the pid
+            sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | sed -n "1,200p"'
             sudo docker exec "${CONTAINER}" nginx -s reload || true
-            # List current files being served (for visibility)
-            sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | tail -n +1'
 
       # Remove the temporary SSH ingress
       - name: Revoke runner IP for SSH (cleanup)
@@ -160,7 +170,7 @@ jobs:
             done
           fi
 
-      # Quick smoke test
+      # Quick smoke test with cache-bust
       - name: Smoke test
         env:
           HOST: ${{ steps.ec2.outputs.host }}
