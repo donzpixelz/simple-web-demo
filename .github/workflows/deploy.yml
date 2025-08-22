@@ -154,7 +154,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          RUNNER_IP="${{ steps.sshop en.outputs.runner_ip }}"
+          RUNNER_IP="${{ steps.sshopen.outputs.runner_ip }}"
           if [[ -n "$RUNNER_IP" ]]; then
             for SG in ${{ steps.ec2.outputs.sg_ids }}; do
               aws ec2 revoke-security-group-ingress \
