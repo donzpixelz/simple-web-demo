@@ -119,7 +119,7 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # ---- Deploy over SSH as ec2-user (auto-install git + docker if missing) ----
+      # ---- Deploy over SSH as ec2-user (auto-install git + docker + compose) ----
       - name: Deploy via SSH (build/pull + restart)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -149,11 +149,28 @@ jobs:
               sudo systemctl enable --now docker
             fi
 
-            # Ensure docker compose v2 available
+            # Ensure Docker Compose v2 plugin OR v1 binary exists
             if ! docker compose version >/dev/null 2>&1; then
-              if command -v apt-get >/dev/null 2>&1; then
-                sudo apt-get install -y docker-compose-plugin || true
+              # try installing v2 plugin
+              sudo mkdir -p /usr/local/lib/docker/cli-plugins
+              if [ ! -x /usr/local/lib/docker/cli-plugins/docker-compose ]; then
+                sudo curl -sSL "https://github.com/docker/compose/releases/download/v2.29.2/docker-compose-$(uname -s)-$(uname -m)" \
+                  -o /usr/local/lib/docker/cli-plugins/docker-compose
+                sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
               fi
+            fi
+            # If still no v2, install v1 as fallback
+            if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+              sudo curl -sSL "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" \
+                -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose
+            fi
+
+            # Choose the compose command
+            if docker compose version >/dev/null 2>&1; then
+              DC="sudo docker compose"
+            else
+              DC="sudo docker-compose"
             fi
 
             sudo mkdir -p "${COMPOSE_DIR}"
@@ -168,9 +185,9 @@ jobs:
             fi
 
             # Works for either 'image:' or 'build:' in docker-compose.yml
-            sudo docker compose pull "${SERVICE_NAME}" || true
-            sudo docker compose build "${SERVICE_NAME}" || true
-            sudo docker compose up -d --no-deps "${SERVICE_NAME}"
+            $DC pull "${SERVICE_NAME}" || true
+            $DC build "${SERVICE_NAME}" || true
+            $DC up -d --no-deps "${SERVICE_NAME}"
             sudo docker image prune -f >/dev/null 2>&1 || true
 
       # ---- Revoke the temporary SSH ingress ----
