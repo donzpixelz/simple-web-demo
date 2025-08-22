@@ -16,8 +16,6 @@ jobs:
       IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/simple-web-demo
       AWS_REGION: us-east-2
       EC2_KEY_NAME: simple-web-demo-key
-      COMPOSE_DIR: /opt/simple-web-demo
-      SERVICE_NAME: web
 
     steps:
       - name: Checkout code (shallow)
@@ -37,7 +35,6 @@ jobs:
               - 'app/**'
             docker:
               - 'Dockerfile'
-              - 'docker-compose.yml'
               - '.github/workflows/deploy.yml'
 
       - name: Log in to Docker Hub
@@ -53,11 +50,11 @@ jobs:
         with:
           context: .
           push: true
+          no-cache: true
           tags: |
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
           provenance: false
-          no-cache: true
 
       # Configure AWS creds (needed for EC2 queries and optional Terraform)
       - name: Configure AWS credentials
@@ -121,7 +118,7 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # ---- Deploy over SSH as ec2-user (auto-install git + docker + compose) ----
+      # ---- Deploy over SSH as ec2-user (run exact image tag, no compose) ----
       - name: Deploy via SSH (pin to commit SHA)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -130,77 +127,29 @@ jobs:
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
           script: |
             set -euo pipefail
-            COMPOSE_DIR="${{ env.COMPOSE_DIR }}"
-            SERVICE_NAME="${{ env.SERVICE_NAME }}"
             IMAGE_NAME="${{ env.IMAGE_NAME }}"
             IMAGE_TAG="${{ github.sha }}"
 
-            # Install git if missing
-            if ! command -v git >/dev/null 2>&1; then
-              if command -v yum >/dev/null 2>&1; then
-                sudo yum install -y git
-              elif command -v dnf >/dev/null 2>&1; then
-                sudo dnf install -y git
-              elif command -v apt-get >/dev/null 2>&1; then
-                sudo apt-get update -y
-                sudo apt-get install -y git
-              fi
-            fi
-
-            # Install Docker if missing (and start it)
+            # Install Docker if missing
             if ! command -v docker >/dev/null 2>&1; then
               curl -fsSL https://get.docker.com | sh
               sudo systemctl enable --now docker
             fi
 
-            # Ensure Docker Compose (v2 plugin; fallback to v1 binary)
-            if ! docker compose version >/dev/null 2>&1; then
-              sudo mkdir -p /usr/local/lib/docker/cli-plugins
-              if [ ! -x /usr/local/lib/docker/cli-plugins/docker-compose ]; then
-                sudo curl -sSL "https://github.com/docker/compose/releases/download/v2.29.2/docker-compose-$(uname -s)-$(uname -m)" \
-                  -o /usr/local/lib/docker/cli-plugins/docker-compose
-                sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-              fi
-            fi
-            if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
-              sudo curl -sSL "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" \
-                -o /usr/local/bin/docker-compose
-              sudo chmod +x /usr/local/bin/docker-compose
-            fi
-            if docker compose version >/dev/null 2>&1; then
-              DC="sudo docker compose"
-            else
-              DC="sudo docker-compose"
-            fi
+            # Pull the exact image we just built
+            sudo docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
 
-            sudo mkdir -p "${COMPOSE_DIR}"
-            sudo chown -R "$USER:$USER" "${COMPOSE_DIR}"
-            cd "${COMPOSE_DIR}"
-
-            # Sync repo (for docker-compose.yml)
-            if [ ! -d .git ]; then
-              git clone --depth=1 https://github.com/donzpixelz/simple-web-demo .
-            else
-              git fetch --depth=1 origin main
-              git reset --hard origin/main
-            fi
-
-            # Write .env so compose uses the SHA tag (unique per deploy)
-            cat > .env <<EOF
-            IMAGE_NAME=${IMAGE_NAME}
-            IMAGE_TAG=${IMAGE_TAG}
-            EOF
-
-            # Clean up any existing container (name conflict)
-            $DC rm -f -s "${SERVICE_NAME}" || true
+            # Stop & remove any old container using the same name
             sudo docker rm -f simple-web-demo || true
 
-            # Pull the exact image for this commit and restart only the service
-            sudo docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
-            $DC up -d --no-deps "${SERVICE_NAME}"
+            # Run the new container with the exact tag
+            sudo docker run -d --name simple-web-demo \
+              -p 8080:80 \
+              --restart unless-stopped \
+              "${IMAGE_NAME}:${IMAGE_TAG}"
 
-            # Optional cleanup
-            sudo docker image prune -f >/dev/null 2>&1 || true
+            # Show what is running (for logs)
+            sudo docker ps --filter "name=simple-web-demo" --format 'Running: {{.Image}} -> {{.Status}}'
 
       # ---- Revoke the temporary SSH ingress ----
       - name: Revoke runner IP for SSH (cleanup)
