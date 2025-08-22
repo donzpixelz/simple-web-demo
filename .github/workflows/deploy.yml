@@ -1,4 +1,4 @@
-name: Deploy static app to EC2 (push-only app/ with no-cache)
+name: Deploy static app to EC2 (push-only app/ with no-cache + fallback)
 
 on:
   push:
@@ -52,7 +52,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Find ONE instance (ID, Host, SGs) for the given key-name
+      # Pick one instance by ID
       - name: Find EC2 instance/host/SGs
         id: ec2
         shell: bash
@@ -89,7 +89,7 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # Ensure Docker + dirs; clean bad default.conf dir if it exists
+      # Ensure Docker + dirs; remove any bad 'default.conf' directory
       - name: Prepare server (docker + dirs)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -104,17 +104,18 @@ jobs:
             if ! command -v docker >/dev/null 2>&1; then
               curl -fsSL https://get.docker.com | sh
               sudo systemctl enable --now docker || sudo service docker start || true
+            else
+              sudo systemctl start docker || sudo service docker start || true
             fi
 
             sudo mkdir -p "${WEB_ROOT}"
             sudo mkdir -p "${CONF_DIR}"
-            # If someone accidentally created a directory at default.conf, remove it
             if [ -d "${CONF_DIR}/default.conf" ]; then
               sudo rm -rf "${CONF_DIR}/default.conf"
             fi
             sudo chown -R "$USER:$USER" /opt/simple-web-demo
 
-      # Upload config and app content (flatten app/ contents into WEB_ROOT)
+      # Upload config and app content
       - name: Upload nginx/default.conf
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -135,8 +136,8 @@ jobs:
           target: "${{ env.WEB_ROOT }}/"
           strip_components: 1
 
-      # Recreate container with both mounts and BOTH published ports (80 & 8080)
-      - name: Recreate container and validate nginx
+      # Recreate container; validate nginx; if it fails, fall back to default config
+      - name: Recreate container and validate nginx (with fallback)
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -148,18 +149,17 @@ jobs:
             CONF_DIR="${{ env.CONF_DIR }}"
             CONTAINER="${{ env.CONTAINER }}"
 
-            # <<< ENSURE DOCKER DAEMON IS RUNNING (start if needed) >>>
+            # Ensure Docker daemon is alive
             if ! sudo docker info >/dev/null 2>&1; then
               sudo systemctl start docker || sudo service docker start || true
-              # as a last resort, launch dockerd directly (rare)
               if ! sudo docker info >/dev/null 2>&1; then
                 nohup sudo dockerd >/tmp/dockerd.log 2>&1 &
                 sleep 3
               fi
             fi
-            # double-check
             sudo docker info >/dev/null
 
+            # Try with custom conf (no-cache)
             sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
             sudo docker run -d --name "${CONTAINER}" \
               -p 80:80 -p 8080:80 \
@@ -168,12 +168,20 @@ jobs:
               --restart unless-stopped \
               nginx:alpine
 
-            # Give it a moment, then test from inside host & container
             sleep 2
+            if ! sudo docker exec "${CONTAINER}" nginx -t; then
+              echo "Custom nginx config failed; falling back to default config"
+              sudo docker rm -f "${CONTAINER}" || true
+              sudo docker run -d --name "${CONTAINER}" \
+                -p 80:80 -p 8080:80 \
+                -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
+                --restart unless-stopped \
+                nginx:alpine
+              sleep 2
+            fi
+
             echo "--- docker ps ---"
             sudo docker ps --filter "name=${CONTAINER}" --format 'ports={{.Ports}} status={{.Status}}'
-            echo "--- nginx -t ---"
-            sudo docker exec "${CONTAINER}" nginx -t
             echo "--- served files ---"
             sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | sed -n "1,200p"'
             echo "--- curl inside container (http://127.0.0.1/) ---"
@@ -215,15 +223,17 @@ jobs:
             done
           fi
 
-      # External smoke test: try :8080 first, then :80 before failing
+      # External smoke test: try :8080 first, then :80 before failing (with retries)
       - name: Smoke test
         env:
           HOST: ${{ steps.ec2.outputs.host }}
         run: |
           set -euo pipefail
-          echo "Trying http://${HOST}:8080/ ..."
-          if curl -fsS --max-time 15 "http://${HOST}:8080/?nocache=$(date +%s)" >/dev/null; then
-            exit 0
-          fi
-          echo "Trying http://${HOST}/ ..."
-          curl -fsS --max-time 15 "http://${HOST}/?nocache=$(date +%s)" >/dev/null
+          for URL in "http://${HOST}:8080/" "http://${HOST}/"; do
+            echo "Trying ${URL} ..."
+            if curl -v --retry 4 --retry-connrefused --retry-delay 3 --max-time 20 -fsS "${URL}?nocache=$(date +%s)" >/dev/null; then
+              exit 0
+            fi
+          done
+          echo "Both ports failed"
+          exit 7
