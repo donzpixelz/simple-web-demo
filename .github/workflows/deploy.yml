@@ -50,11 +50,11 @@ jobs:
 
       - name: Terraform Apply
         working-directory: terraform
-        env:
-          TF_VAR_dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
-          TF_VAR_ssh_key_name: simple-web-demo-key
-          TF_VAR_docker_image: ${{ env.IMAGE_NAME }}:latest
-        run: terraform apply -auto-approve -input=false
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var 'ssh_key_name=simple-web-demo-key' \
+            -var "dockerhub_username=${{ secrets.DOCKERHUB_USERNAME }}" \
+            -var "docker_image=${{ env.IMAGE_NAME }}:latest"
 
       # --- Discover current EC2 host dynamically in us-east-2 ---
       - name: Configure AWS credentials
@@ -93,3 +93,31 @@ jobs:
             local USER=$1
             ssh -o StrictHostKeyChecking=yes -i ~/.ssh/id_ec2 "${USER}@${HOST}" "bash -s" <<'REMOTE'
               set -euo pipefail
+              sudo mkdir -p "${COMPOSE_DIR}"
+              sudo chown -R "$USER":"$USER" "${COMPOSE_DIR}"
+              cd "${COMPOSE_DIR}"
+
+              if [ ! -d .git ]; then
+                git clone --depth=1 https://github.com/donzpixelz/simple-web-demo .
+              else
+                git fetch --depth=1 origin main
+                git reset --hard origin/main
+              fi
+
+              docker compose pull "${SERVICE_NAME}" || true
+              docker compose build "${SERVICE_NAME}" || true
+              docker compose up -d --no-deps "${SERVICE_NAME}"
+              docker image prune -f >/dev/null 2>&1 || true
+  REMOTE
+  }
+
+  if ! try_ssh ubuntu; then
+  echo "ubuntu user failed; trying ec2-user..."
+  try_ssh ec2-user
+  fi
+
+- name: Smoke test
+  env:
+    HOST: ${{ steps.ec2.outputs.host }}
+  run: |
+    curl -fsS --max-time 10 "http://${HOST}:8080/" >/dev/null
