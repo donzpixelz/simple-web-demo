@@ -1,4 +1,4 @@
-name: Deploy static app to EC2 (push-only app/ with no-cache + fallback)
+name: Deploy static app to EC2 (push-only app/ + no-cache)
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
       AWS_REGION: us-east-2
       EC2_KEY_NAME: simple-web-demo-key
       WEB_ROOT: /opt/simple-web-demo/app
-      CONF_DIR: /opt/simple-web-demo/nginx/conf.d
+      CONF_FILE: /opt/simple-web-demo/nginx/default.conf   # single file mount
       CONTAINER: simple-web-demo
 
     steps:
@@ -25,7 +25,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      # Only run when app/**, nginx conf, or workflow changed
       - name: Detect changed paths
         id: changes
         uses: dorny/paths-filter@v3
@@ -44,7 +43,6 @@ jobs:
           echo "No app/ or nginx conf changes; skipping deploy."
           exit 0
 
-      # AWS creds to find instance & edit SG temporarily
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -52,7 +50,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Pick one instance by ID
       - name: Find EC2 instance/host/SGs
         id: ec2
         shell: bash
@@ -73,14 +70,12 @@ jobs:
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "sg_ids=$SG_IDS" >> "$GITHUB_OUTPUT"
 
-      # Temporarily allow this GitHub runner to SSH (port 22)
       - name: Authorize runner IP for SSH (temp)
         id: sshopen
         shell: bash
         run: |
           set -euo pipefail
           RUNNER_IP=$(curl -s https://checkip.amazonaws.com | tr -d '\n')
-          echo "Runner IP: $RUNNER_IP"
           for SG in ${{ steps.ec2.outputs.sg_ids }}; do
             aws ec2 authorize-security-group-ingress \
               --group-id "$SG" \
@@ -89,8 +84,7 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # Ensure Docker + dirs; remove any bad 'default.conf' directory
-      - name: Prepare server (docker + dirs)
+      - name: Prepare server (Docker + dirs)
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -99,34 +93,35 @@ jobs:
           script: |
             set -euxo pipefail
             WEB_ROOT="${{ env.WEB_ROOT }}"
-            CONF_DIR="${{ env.CONF_DIR }}"
+            CONF_FILE="${{ env.CONF_FILE }}"
 
             if ! command -v docker >/dev/null 2>&1; then
               curl -fsSL https://get.docker.com | sh
-              sudo systemctl enable --now docker || sudo service docker start || true
-            else
-              sudo systemctl start docker || sudo service docker start || true
             fi
+
+            # Start Docker and wait until it's really up
+            sudo systemctl start docker || sudo service docker start || true
+            for i in {1..10}; do
+              if sudo docker info >/dev/null 2>&1; then break; fi
+              sleep 1
+            done
+            sudo docker info >/dev/null
 
             sudo mkdir -p "${WEB_ROOT}"
-            sudo mkdir -p "${CONF_DIR}"
-            if [ -d "${CONF_DIR}/default.conf" ]; then
-              sudo rm -rf "${CONF_DIR}/default.conf"
-            fi
+            sudo mkdir -p "$(dirname "${CONF_FILE}")"
             sudo chown -R "$USER:$USER" /opt/simple-web-demo
 
-      # Upload config and app content
-      - name: Upload nginx/default.conf
+      - name: Upload nginx/default.conf (single file)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ steps.ec2.outputs.host }}
           username: ec2-user
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
           source: "nginx/default.conf"
-          target: "${{ env.CONF_DIR }}/"
+          target: "${{ env.CONF_FILE }}"
           overwrite: true
 
-      - name: Upload app/ to server
+      - name: Upload app/ to server (flatten contents)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -136,8 +131,7 @@ jobs:
           target: "${{ env.WEB_ROOT }}/"
           strip_components: 1
 
-      # Recreate container; validate nginx; if it fails, fall back to default config
-      - name: Recreate container and validate nginx (with fallback)
+      - name: Recreate container and validate nginx (fallback if needed)
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -146,31 +140,30 @@ jobs:
           script: |
             set -euxo pipefail
             WEB_ROOT="${{ env.WEB_ROOT }}"
-            CONF_DIR="${{ env.CONF_DIR }}"
+            CONF_FILE="${{ env.CONF_FILE }}"
             CONTAINER="${{ env.CONTAINER }}"
 
             # Ensure Docker daemon is alive
-            if ! sudo docker info >/dev/null 2>&1; then
-              sudo systemctl start docker || sudo service docker start || true
-              if ! sudo docker info >/dev/null 2>&1; then
-                nohup sudo dockerd >/tmp/dockerd.log 2>&1 &
-                sleep 3
-              fi
-            fi
+            sudo systemctl start docker || sudo service docker start || true
+            for i in {1..10}; do
+              if sudo docker info >/dev/null 2>&1; then break; fi
+              sleep 1
+            done
             sudo docker info >/dev/null
 
-            # Try with custom conf (no-cache)
             sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+
+            # Try with our config file mounted directly
             sudo docker run -d --name "${CONTAINER}" \
               -p 80:80 -p 8080:80 \
               -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
-              -v "${CONF_DIR}":/etc/nginx/conf.d:ro \
+              -v "${CONF_FILE}":/etc/nginx/conf.d/default.conf:ro \
               --restart unless-stopped \
               nginx:alpine
 
             sleep 2
             if ! sudo docker exec "${CONTAINER}" nginx -t; then
-              echo "Custom nginx config failed; falling back to default config"
+              echo "Custom config failed; falling back to default config only."
               sudo docker rm -f "${CONTAINER}" || true
               sudo docker run -d --name "${CONTAINER}" \
                 -p 80:80 -p 8080:80 \
@@ -182,16 +175,19 @@ jobs:
 
             echo "--- docker ps ---"
             sudo docker ps --filter "name=${CONTAINER}" --format 'ports={{.Ports}} status={{.Status}}'
+            echo "--- nginx test ---"
+            sudo docker exec "${CONTAINER}" nginx -t || true
             echo "--- served files ---"
             sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | sed -n "1,200p"'
-            echo "--- curl inside container (http://127.0.0.1/) ---"
-            sudo docker exec "${CONTAINER}" sh -lc 'wget -qO- http://127.0.0.1/ | head -n 5 || true'
-            echo "--- curl from host to localhost:80 and :8080 ---"
+            echo "--- docker logs (last 50) ---"
+            sudo docker logs --tail 50 "${CONTAINER}" || true
+            echo "--- curl inside container ---"
+            sudo docker exec "${CONTAINER}" sh -lc 'wget -qO- http://127.0.0.1/ | head -n 10 || true'
+            echo "--- curl from host ---"
             (command -v curl >/dev/null 2>&1 || sudo yum install -y curl >/dev/null 2>&1 || { sudo apt-get update -y && sudo apt-get install -y curl >/dev/null 2>&1; } )
             curl -sv --max-time 5 http://127.0.0.1/ >/dev/null || true
             curl -sv --max-time 5 http://127.0.0.1:8080/ >/dev/null || true
 
-      # Ensure inbound 80 and 8080 are open on the instance SGs
       - name: Ensure SG allows TCP/80 and /8080 from 0.0.0.0/0
         shell: bash
         run: |
@@ -207,7 +203,6 @@ jobs:
               || true
           done
 
-      # Remove the temporary SSH ingress
       - name: Revoke runner IP for SSH (cleanup)
         if: always()
         shell: bash
@@ -223,8 +218,7 @@ jobs:
             done
           fi
 
-      # External smoke test: try :8080 first, then :80 before failing (with retries)
-      - name: Smoke test
+      - name: Smoke test (8080 then 80)
         env:
           HOST: ${{ steps.ec2.outputs.host }}
         run: |
