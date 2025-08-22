@@ -16,6 +16,8 @@ jobs:
       IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/simple-web-demo
       AWS_REGION: us-east-2              # your region
       EC2_KEY_NAME: simple-web-demo-key  # your EC2 key pair name
+      COMPOSE_DIR: /opt/simple-web-demo
+      SERVICE_NAME: web
 
     steps:
       - name: Checkout code (shallow)
@@ -55,7 +57,7 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
           provenance: false
 
-      # Configure AWS creds (needed for Terraform and for EC2 host discovery)
+      # Configure AWS creds (needed for Terraform and EC2 queries)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -82,8 +84,8 @@ jobs:
             -var "dockerhub_username=${{ secrets.DOCKERHUB_USERNAME }}" \
             -var "docker_image=${{ env.IMAGE_NAME }}:latest"
 
-      # ---- Discover current EC2 host dynamically in us-east-2 ----
-      - name: Find EC2 public DNS by key name
+      # ---- Discover instance host + security groups ----
+      - name: Find EC2 host and SGs
         id: ec2
         shell: bash
         run: |
@@ -95,9 +97,29 @@ jobs:
             echo "No running instance found with key-name=${EC2_KEY_NAME} in region ${AWS_REGION}"
             exit 1
           fi
+          SG_IDS=$(aws ec2 describe-instances \
+            --filters "Name=key-name,Values=${EC2_KEY_NAME}" "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].SecurityGroups[].GroupId" --output text)
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "sg_ids=$SG_IDS" >> "$GITHUB_OUTPUT"
 
-      # ---- Deploy (build/pull + restart) over SSH as ec2-user ----
+      # ---- TEMP open SSH from this runner (and close it after) ----
+      - name: Authorize runner IP for SSH (temp)
+        id: sshopen
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_IP=$(curl -s https://checkip.amazonaws.com | tr -d '\n')
+          echo "Runner IP: $RUNNER_IP"
+          for SG in ${{ steps.ec2.outputs.sg_ids }}; do
+            aws ec2 authorize-security-group-ingress \
+              --group-id "$SG" \
+              --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${RUNNER_IP}/32,Description=gha-temp}]" \
+              || true
+          done
+          echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
+
+      # ---- Deploy over SSH as ec2-user ----
       - name: Deploy via SSH (build/pull + restart)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -106,8 +128,8 @@ jobs:
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
           script: |
             set -euo pipefail
-            COMPOSE_DIR=/opt/simple-web-demo
-            SERVICE_NAME=web
+            COMPOSE_DIR="${{ env.COMPOSE_DIR }}"
+            SERVICE_NAME="${{ env.SERVICE_NAME }}"
 
             sudo mkdir -p "${COMPOSE_DIR}"
             sudo chown -R "$USER:$USER" "${COMPOSE_DIR}"
@@ -125,6 +147,22 @@ jobs:
             docker compose build "${SERVICE_NAME}" || true
             docker compose up -d --no-deps "${SERVICE_NAME}"
             docker image prune -f >/dev/null 2>&1 || true
+
+      # ---- Revoke the temporary SSH ingress ----
+      - name: Revoke runner IP for SSH (cleanup)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_IP="${{ steps.sshop en.outputs.runner_ip }}"
+          if [[ -n "$RUNNER_IP" ]]; then
+            for SG in ${{ steps.ec2.outputs.sg_ids }}; do
+              aws ec2 revoke-security-group-ingress \
+                --group-id "$SG" \
+                --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${RUNNER_IP}/32,Description=gha-temp}]" \
+                || true
+            done
+          fi
 
       - name: Smoke test
         env:
