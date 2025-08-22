@@ -1,4 +1,4 @@
-name: Build and Deploy Demo
+name: Deploy static app to EC2 (push-only app/)
 
 on:
   push:
@@ -9,54 +9,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
 
     env:
-      IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/simple-web-demo
-      AWS_REGION: us-east-2
-      EC2_KEY_NAME: simple-web-demo-key
+      AWS_REGION: us-east-2                 # your region
+      EC2_KEY_NAME: simple-web-demo-key     # your EC2 key pair name
+      WEB_ROOT: /opt/simple-web-demo/app    # where files live on server
+      CONTAINER: simple-web-demo            # nginx container name
+      PORT: "8080"                          # public port
 
     steps:
-      - name: Checkout code (shallow)
+      - name: Checkout (shallow)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # Detect what changed in this push
+      # Only run when app/** changed (or this workflow changed)
       - name: Detect changed paths
         id: changes
         uses: dorny/paths-filter@v3
         with:
           filters: |
-            terraform:
-              - 'terraform/**'
             app:
               - 'app/**'
-            docker:
-              - 'Dockerfile'
+            workflow:
               - '.github/workflows/deploy.yml'
 
-      - name: Log in to Docker Hub
-        if: steps.changes.outputs.app == 'true' || steps.changes.outputs.docker == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Stop early if no app changes
+        if: steps.changes.outputs.app != 'true' && steps.changes.outputs.workflow != 'true'
+        run: |
+          echo "No app/ changes; skipping deploy."
+          exit 0
 
-      - name: Build and push Docker image (latest + sha)
-        if: steps.changes.outputs.app == 'true' || steps.changes.outputs.docker == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          no-cache: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:latest
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
-          provenance: false
-
-      # Configure AWS creds (needed for EC2 queries and optional Terraform)
+      # AWS needed to discover instance & manage SG temporarily
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -64,27 +50,8 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---- Terraform runs ONLY if terraform/** changed ----
-      - name: Setup Terraform
-        if: steps.changes.outputs.terraform == 'true'
-        uses: hashicorp/setup-terraform@v3
-
-      - name: Terraform Init
-        if: steps.changes.outputs.terraform == 'true'
-        working-directory: terraform
-        run: terraform init -input=false
-
-      - name: Terraform Apply
-        if: steps.changes.outputs.terraform == 'true'
-        working-directory: terraform
-        run: |
-          terraform apply -auto-approve -input=false \
-            -var 'ssh_key_name=simple-web-demo-key' \
-            -var "dockerhub_username=${{ secrets.DOCKERHUB_USERNAME }}" \
-            -var "docker_image=${{ env.IMAGE_NAME }}:latest"
-
-      # ---- Discover instance host + security groups ----
-      - name: Find EC2 host and SGs
+      # Find your running instance created with this key pair
+      - name: Find EC2 host & SGs
         id: ec2
         shell: bash
         run: |
@@ -93,7 +60,7 @@ jobs:
             --filters "Name=key-name,Values=${EC2_KEY_NAME}" "Name=instance-state-name,Values=running" \
             --query "Reservations[].Instances[].PublicDnsName" --output text)
           if [[ -z "$HOST" || "$HOST" == "None" ]]; then
-            echo "No running instance found with key-name=${EC2_KEY_NAME} in region ${AWS_REGION}"
+            echo "No running instance found with key-name=${EC2_KEY_NAME} in ${AWS_REGION}"
             exit 1
           fi
           SG_IDS=$(aws ec2 describe-instances \
@@ -102,7 +69,7 @@ jobs:
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "sg_ids=$SG_IDS" >> "$GITHUB_OUTPUT"
 
-      # ---- TEMP open SSH from this runner (and close it after) ----
+      # Allow this GitHub runner to SSH (port 22) temporarily
       - name: Authorize runner IP for SSH (temp)
         id: sshopen
         shell: bash
@@ -118,8 +85,8 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # ---- Deploy over SSH as ec2-user (run exact image tag, no compose) ----
-      - name: Deploy via SSH (pin to commit SHA)
+      # Prepare the server once (install docker, create dir, start nginx container with a bind mount)
+      - name: One-time prep on server (docker + nginx container)
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -127,37 +94,67 @@ jobs:
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
           script: |
             set -euo pipefail
-            IMAGE_NAME="${{ env.IMAGE_NAME }}"
-            IMAGE_TAG="${{ github.sha }}"
+            WEB_ROOT="${{ env.WEB_ROOT }}"
+            CONTAINER="${{ env.CONTAINER }}"
+            PORT="${{ env.PORT }}"
 
-            # Install Docker if missing
+            # Install docker if missing
             if ! command -v docker >/dev/null 2>&1; then
               curl -fsSL https://get.docker.com | sh
               sudo systemctl enable --now docker
             fi
 
-            # Pull the exact image we just built
-            sudo docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
+            # Ensure target directory exists and is writable by ec2-user
+            sudo mkdir -p "${WEB_ROOT}"
+            sudo chown -R "$USER:$USER" "$(dirname "${WEB_ROOT}")"
 
-            # Stop & remove any old container using the same name
-            sudo docker rm -f simple-web-demo || true
+            # If container doesn't exist, create it with a bind mount to WEB_ROOT
+            if ! sudo docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
+              sudo docker run -d --name "${CONTAINER}" \
+                -p ${PORT}:80 \
+                -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
+                --restart unless-stopped \
+                nginx:alpine
+            else
+              # Ensure it's running
+              sudo docker start "${CONTAINER}" >/dev/null 2>&1 || true
+            fi
 
-            # Run the new container with the exact tag
-            sudo docker run -d --name simple-web-demo \
-              -p 8080:80 \
-              --restart unless-stopped \
-              "${IMAGE_NAME}:${IMAGE_TAG}"
+      # Copy only changed app/ files to the server
+      - name: Upload app/ to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.ec2.outputs.host }}
+          username: ec2-user
+          key: ${{ secrets.AWS_EC2_SSH_KEY }}
+          source: "app/*"
+          target: "${{ env.WEB_ROOT }}/"
+          overwrite: true
+          strip_components: 1
 
-            # Show what is running (for logs)
-            sudo docker ps --filter "name=simple-web-demo" --format 'Running: {{.Image}} -> {{.Status}}'
+      # Reload nginx so it picks up new files (no container restart required)
+      - name: Reload nginx (no-downtime)
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ steps.ec2.outputs.host }}
+          username: ec2-user
+          key: ${{ secrets.AWS_EC2_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            CONTAINER="${{ env.CONTAINER }}"
+            # Try graceful reload; fallback to HUP
+            sudo docker exec "${CONTAINER}" nginx -s reload || sudo docker kill -s HUP "${CONTAINER}" || true
+            # Show what we serve now
+            sudo docker exec "${CONTAINER}" sh -c 'ls -la /usr/share/nginx/html | tail -n +1'
 
-      # ---- Revoke the temporary SSH ingress ----
+      # Clean up SSH ingress rule
       - name: Revoke runner IP for SSH (cleanup)
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          RUNNER_IP="${{ steps.sshopen.outputs.runner_ip }}"
+          RUNNER_IP="${{ steps.sshop en.outputs.runner_ip }}"
+          RUNNER_IP="${RUNNER_IP:-${{ steps.sshopen.outputs.runner_ip }}}"
           if [[ -n "$RUNNER_IP" ]]; then
             for SG in ${{ steps.ec2.outputs.sg_ids }}; do
               aws ec2 revoke-security-group-ingress \
@@ -167,8 +164,10 @@ jobs:
             done
           fi
 
+      # Quick smoke test
       - name: Smoke test
         env:
           HOST: ${{ steps.ec2.outputs.host }}
+          PORT: ${{ env.PORT }}
         run: |
-          curl -fsS --max-time 10 "http://${HOST}:8080/" >/dev/null
+          curl -fsS --max-time 10 "http://${HOST}:${PORT}/?nocache=$(date +%s)" >/dev/null
