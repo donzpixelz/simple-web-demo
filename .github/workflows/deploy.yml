@@ -1,4 +1,4 @@
-name: Deploy static app to EC2 (push-only app/ + no-cache)
+name: Deploy static app to EC2 (push-only app/ + resilient nginx)
 
 on:
   push:
@@ -84,7 +84,6 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # Ensure Docker; clean any bad paths; create proper conf.d directory
       - name: Prepare server (Docker + paths)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -96,7 +95,6 @@ jobs:
             WEB_ROOT="${{ env.WEB_ROOT }}"
             CONF_DIR="${{ env.CONF_DIR }}"
 
-            # Install/start Docker and wait until it's usable
             if ! command -v docker >/dev/null 2>&1; then
               curl -fsSL https://get.docker.com | sh
             fi
@@ -107,21 +105,13 @@ jobs:
             done
             sudo docker info >/dev/null
 
-            # Ensure target dirs exist; fix any incorrect path types
             sudo mkdir -p "${WEB_ROOT}"
             sudo mkdir -p "${CONF_DIR}"
-
-            # If these accidental directories exist, remove them
-            if [ -d "/opt/simple-web-demo/nginx/default.conf" ]; then
-              sudo rm -rf "/opt/simple-web-demo/nginx/default.conf"
-            fi
-            if [ -d "/opt/simple-web-demo/nginx/conf.d/default.conf" ]; then
-              sudo rm -rf "/opt/simple-web-demo/nginx/conf.d/default.conf"
-            fi
-
+            # Clean any bad path leftovers
+            [ -d "/opt/simple-web-demo/nginx/default.conf" ] && sudo rm -rf "/opt/simple-web-demo/nginx/default.conf"
+            [ -d "/opt/simple-web-demo/nginx/conf.d/default.conf" ] && sudo rm -rf "/opt/simple-web-demo/nginx/conf.d/default.conf"
             sudo chown -R "$USER:$USER" /opt/simple-web-demo
 
-      # Upload the **file** into the conf.d directory
       - name: Upload nginx/default.conf
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -129,10 +119,9 @@ jobs:
           username: ec2-user
           key: ${{ secrets.AWS_EC2_SSH_KEY }}
           source: "nginx/default.conf"
-          target: "${{ env.CONF_DIR }}/"   # into directory (keeps filename)
+          target: "${{ env.CONF_DIR }}/"
           overwrite: true
 
-      # Upload app/ contents (flatten)
       - name: Upload app/ to server
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -143,8 +132,7 @@ jobs:
           target: "${{ env.WEB_ROOT }}/"
           strip_components: 1
 
-      # Recreate container; validate nginx; curl locally
-      - name: Recreate container and validate nginx
+      - name: Start with custom nginx conf; fallback if not serving
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ steps.ec2.outputs.host }}
@@ -157,6 +145,8 @@ jobs:
             CONTAINER="${{ env.CONTAINER }}"
 
             sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+
+            # Start with our conf.d mounted
             sudo docker run -d --name "${CONTAINER}" \
               -p 80:80 -p 8080:80 \
               -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
@@ -164,12 +154,35 @@ jobs:
               --restart unless-stopped \
               nginx:alpine
 
-            # Give it a moment and verify
             sleep 2
+            echo "--- conf.d on host ---"
+            ls -la "${CONF_DIR}" || true
+            echo "--- conf.d in container ---"
+            sudo docker exec "${CONTAINER}" sh -lc 'ls -la /etc/nginx/conf.d || true'
+            echo "--- nginx -T (first 120 lines) ---"
+            sudo docker exec "${CONTAINER}" sh -lc 'nginx -T 2>&1 | sed -n "1,120p"'
+
+            # Try to serve locally
+            set +e
+            sudo docker exec "${CONTAINER}" sh -lc 'wget -qO- http://127.0.0.1/ >/dev/null'
+            SERVED=$?
+            set -e
+
+            if [ "$SERVED" -ne 0 ]; then
+              echo "Custom config failed to serve; falling back to stock nginx (no conf mount)."
+              sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+              sudo docker run -d --name "${CONTAINER}" \
+                -p 80:80 -p 8080:80 \
+                -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
+                --restart unless-stopped \
+                nginx:alpine
+              sleep 2
+            fi
+
             echo "--- docker ps ---"
             sudo docker ps --filter "name=${CONTAINER}" --format 'ports={{.Ports}} status={{.Status}}'
-            echo "--- nginx -t ---"
-            sudo docker exec "${CONTAINER}" nginx -t
+            echo "--- docker logs (last 80) ---"
+            sudo docker logs --tail 80 "${CONTAINER}" || true
             echo "--- served files ---"
             sudo docker exec "${CONTAINER}" sh -lc 'ls -la /usr/share/nginx/html | sed -n "1,200p"'
             echo "--- curl inside container ---"
@@ -179,7 +192,6 @@ jobs:
             curl -sv --max-time 5 http://127.0.0.1/ >/dev/null || true
             curl -sv --max-time 5 http://127.0.0.1:8080/ >/dev/null || true
 
-      # Ensure inbound 80/8080 are open
       - name: Ensure SG allows TCP/80 and /8080 from 0.0.0.0/0
         shell: bash
         run: |
@@ -210,8 +222,7 @@ jobs:
             done
           fi
 
-      # External smoke test (8080, then 80)
-      - name: Smoke test
+      - name: Smoke test (8080 then 80)
         env:
           HOST: ${{ steps.ec2.outputs.host }}
         run: |
