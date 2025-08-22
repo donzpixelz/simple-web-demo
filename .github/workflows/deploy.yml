@@ -89,7 +89,7 @@ jobs:
           done
           echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
 
-      # Ensure Docker + dirs; fix any bad default.conf dir if it exists
+      # Ensure Docker + dirs; clean bad default.conf dir if it exists
       - name: Prepare server (docker + dirs)
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -103,7 +103,7 @@ jobs:
 
             if ! command -v docker >/dev/null 2>&1; then
               curl -fsSL https://get.docker.com | sh
-              sudo systemctl enable --now docker
+              sudo systemctl enable --now docker || sudo service docker start || true
             fi
 
             sudo mkdir -p "${WEB_ROOT}"
@@ -148,6 +148,18 @@ jobs:
             CONF_DIR="${{ env.CONF_DIR }}"
             CONTAINER="${{ env.CONTAINER }}"
 
+            # <<< ENSURE DOCKER DAEMON IS RUNNING (start if needed) >>>
+            if ! sudo docker info >/dev/null 2>&1; then
+              sudo systemctl start docker || sudo service docker start || true
+              # as a last resort, launch dockerd directly (rare)
+              if ! sudo docker info >/dev/null 2>&1; then
+                nohup sudo dockerd >/tmp/dockerd.log 2>&1 &
+                sleep 3
+              fi
+            fi
+            # double-check
+            sudo docker info >/dev/null
+
             sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
             sudo docker run -d --name "${CONTAINER}" \
               -p 80:80 -p 8080:80 \
@@ -167,7 +179,7 @@ jobs:
             echo "--- curl inside container (http://127.0.0.1/) ---"
             sudo docker exec "${CONTAINER}" sh -lc 'wget -qO- http://127.0.0.1/ | head -n 5 || true'
             echo "--- curl from host to localhost:80 and :8080 ---"
-            (command -v curl >/dev/null 2>&1 || sudo yum install -y curl >/dev/null 2>&1 || sudo apt-get update -y && sudo apt-get install -y curl >/dev/null 2>&1)
+            (command -v curl >/dev/null 2>&1 || sudo yum install -y curl >/dev/null 2>&1 || { sudo apt-get update -y && sudo apt-get install -y curl >/dev/null 2>&1; } )
             curl -sv --max-time 5 http://127.0.0.1/ >/dev/null || true
             curl -sv --max-time 5 http://127.0.0.1:8080/ >/dev/null || true
 
