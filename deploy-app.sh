@@ -50,10 +50,7 @@ get_ip() {
     echo "$H"; return
   fi
   if command -v python3 >/dev/null 2>&1; then
-    python3 - <<PY 2>/dev/null || true
-import socket,sys
-print(socket.gethostbyname(sys.argv[1]))
-PY
+    python3 -c 'import socket,sys;print(socket.gethostbyname(sys.argv[1]))' "$H" 2>/dev/null || true
     return
   fi
   if command -v dig >/dev/null 2>&1; then
@@ -66,22 +63,28 @@ PY
 HOST="$(get_host)"
 IP="$(get_ip "$HOST")"
 
-printf '📦 Checking for changes in app/...\n'
+printf 'Checking for changes in app/... \n'
 
 # Stage only app/ (the '--' guards against weird path matches)
 git add -A -- app/
 
 # If nothing is staged, bail out quietly but still show the URLs
 if git diff --cached --quiet; then
-  printf '✅ No changes detected in app/ (nothing to commit).\n'
-  printf '🌐 Open:  http://%s/  (or http://%s:%s/)\n' "$HOST" "$HOST" "$ALT_PORT"
-  [[ -n "$IP" ]] && printf '🔗 Plain: http://%s/\n' "$IP"
+  printf 'No changes detected in app/ (nothing to commit).\n'
+  printf 'Open:  http://%s/  (or http://%s:%s/)\n' "$HOST" "$HOST" "$ALT_PORT"
+  [[ -n "$IP" ]] && printf 'Plain: http://%s/\n' "$IP"
   exit 0
 fi
 
-printf '📤 Committing and pushing app/ changes...\n'
+printf 'Committing and pushing app/ changes...\n'
 git commit -m "Update app (HTML/CSS/JS)"
-git push origin main
+# If direct push fails because remote is ahead, tell the user what to do.
+if ! git push origin main; then
+  printf 'Push failed because remote main has new commits.\n'
+  printf 'Either run:  git pull --rebase origin main  &&  git push origin main\n'
+  printf '...or use PR flow with ./deploy-app-pr.sh\n'
+  exit 1
+fi
 
-printf '🚀 Done. Open:  http://%s/  (or http://%s:%s/)\n' "$HOST" "$HOST" "$ALT_PORT"
-[[ -n "$IP" ]] && printf '🔗 Plain: http://%s/\n' "$IP"
+printf 'Done. Open:  http://%s/  (or http://%s:%s/)\n' "$HOST" "$HOST" "$ALT_PORT"
+[[ -n "$IP" ]] && printf 'Plain: http://%s/\n' "$IP"
