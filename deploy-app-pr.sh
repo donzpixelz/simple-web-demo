@@ -19,9 +19,10 @@ git fetch --prune origin
 git switch main 2>/dev/null || git switch -c main
 # fast-forward from origin/main; if diverged, stop with a clear message
 if ! git pull --ff-only origin main; then
-  echo "❌ Local 'main' diverged from origin. Run these once, then re-run this script:"
-  echo "   git fetch origin"
-  echo "   git reset --hard origin/main"
+  echo "Local 'main' diverged from origin."
+  echo "Run once, then re-run this script:"
+  echo "  git fetch origin"
+  echo "  git reset --hard origin/main"
   exit 1
 fi
 
@@ -29,7 +30,7 @@ step "Staging ONLY app/ changes"
 git add -A -- app/
 
 if git diff --cached --quiet; then
-  echo "✅ No changes detected in app/ (nothing to commit)."
+  echo "No changes detected in app/ (nothing to commit)."
   exit 0
 fi
 
@@ -51,15 +52,10 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
 fi
 
 if [[ -z "$PR_URL" ]]; then
-  # Build compare URL if gh isn't available
-  URL="$(git config --get remote.origin.url)"
-  if [[ "$URL" =~ ^git@github\.com:(.+)/(.+)\.git$ ]]; then
-    OWNER="${BASH_REMATCH[1]}"; REPO="${BASH_REMATCH[2]}"
-  elif [[ "$URL" =~ ^https://github\.com/(.+)/(.+)\.git$ ]]; then
-    OWNER="${BASH_REMATCH[1]}"; REPO="${BASH_REMATCH[2]}"
-  else
-    echo "Could not parse remote URL: $URL"; exit 1
-  fi
+  ORIGIN="$(git remote get-url origin)"
+  PAIR="$(echo "$ORIGIN" | sed -E 's#(git@|https://)github\.com[:/]|\.git$##g')"
+  OWNER="${PAIR%%/*}"
+  REPO="${PAIR##*/}"
   PR_URL="https://github.com/${OWNER}/${REPO}/compare/main...${BR}?expand=1"
 fi
 
@@ -67,7 +63,7 @@ step "Switching you back to 'main'"
 git switch main
 
 echo
-echo "📝 Open PR: $PR_URL"
+echo "Open PR: $PR_URL"
 command -v open >/dev/null && open "$PR_URL" || true
 
 cat <<'NEXT'
@@ -78,7 +74,4 @@ Next in browser:
   3) Click “Merge” (choose “Squash and merge”)
 
 After merge: deploy runs automatically.
-
-Tip: to see step-by-step shell debug, run:
-  DEBUG=1 bash -x ./deploy-app-pr.sh
 NEXT
