@@ -16,13 +16,12 @@ body {
 
 
 .timestamper2 p {
-    font-family: 'copperplate';
+    font-family: 'copperplate' !important;
     /* font-family: 'Playball', cursive; /* Playball font */
-    font-size: 30px;
-    color: white;                     /* text color */
-    letter-spacing: 2px;              /* optional spacing for style */
-    text-align: center;
-    margin-top: 24px;
+    font-size: 30px !important;
+    color: white !important;                     /* text color */
+    letter-spacing: 2px !important;              /* optional spacing for style */
+    text-align: center !important;
     flex: 1;              /* take all available horizontal space */
 }
 
