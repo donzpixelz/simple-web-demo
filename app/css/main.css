@@ -2,7 +2,6 @@ body {
     background-color: white; /* whole page background */
 }
 
-
 .header-outer {
     background-color: #3466cb !important;
     border: 2px solid black !important;
@@ -39,7 +38,6 @@ body {
     margin: 0;             /* reset default margin for better centering */
 }
 
-
 h1 {
     font-family: 'copperplate';
     /* font-family: 'Playball', cursive; /* Playball font */
@@ -60,15 +58,11 @@ h2 {
     margin-top: 24px;
 }
 
-
-
-
 p {
     font-family: 'typewriter';
     text-align: center;
     font-size: 18px;
 }
-
 
 .square-box {
     width: 200px;              /* adjust size as needed */
