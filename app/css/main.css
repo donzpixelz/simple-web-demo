@@ -14,6 +14,13 @@ body {
 }
 
 .timestamper p {
+    flex: 1;              /* take all available horizontal space */
+    text-align: center;    /* centers the H1 text inside its flex item */
+    margin: 0;
+
+}
+
+.timestamper2 p {
     font-family: 'copperplate';
     /* font-family: 'Playball', cursive; /* Playball font */
     font-size: 30px;
@@ -21,7 +28,6 @@ body {
     letter-spacing: 2px;              /* optional spacing for style */
     text-align: center;
     margin-top: 24px;
-
 }
 
 .header-outer {
