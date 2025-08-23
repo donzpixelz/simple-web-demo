@@ -14,8 +14,13 @@ body {
 }
 
 .timestamper p {
-    text-align: center !important;
-    margin: 25px;
+    font-family: 'copperplate';
+    /* font-family: 'Playball', cursive; /* Playball font */
+    font-size: 30px;
+    color: white;                     /* text color */
+    letter-spacing: 2px;              /* optional spacing for style */
+    text-align: center;
+    margin-top: 24px;
 
 }
 
