@@ -2,7 +2,15 @@ body {
     background-color: white; /* whole page background */
 }
 
-.ztime {
+
+
+.ztime  h2 {
+    font-family: 'copperplate';
+    /* font-family: 'Playball', cursive; /* Playball font */
+    font-size: 30px;
+    color: black;                     /* text color */
+    letter-spacing: 2px;              /* optional spacing for style */
+
     background-color: white !important;
     border: 2px dotted black !important;
     border-radius: 10px !important;
@@ -11,17 +19,6 @@ body {
     align-items: center !important;
     text-align: center !important;
     margin: 25px;
-
-}
-
-.ztime  h2 {
-    font-family: 'copperplate';
-    /* font-family: 'Playball', cursive; /* Playball font */
-    font-size: 30px;
-    color: white;                     /* text color */
-    letter-spacing: 2px;              /* optional spacing for style */
-    text-align: center;
-    margin-top: 24px;
 }
 
 .header-outer {
