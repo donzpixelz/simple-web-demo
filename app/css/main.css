@@ -3,27 +3,6 @@ body {
 }
 
 
-
-
-
-.ztimediv {
-    background-color: yellow !important;
-    border: 2px solid black !important;
-    border-radius: 10px !important;
-    padding: 5px 10px !important;
-    display: flex !important;
-    align-items: center !important;
-    text-align: center !important;
-    margin: 25px;
-
-}
-
-.ztime h2 {
-    flex: 1;              /* take all available horizontal space */
-    text-align: center;    /* centers the H1 text inside its flex item */
-    margin: 0;             /* reset default margin for better centering */
-}
-
 .header-outer {
     background-color: #3466cb !important;
     border: 2px solid black !important;
@@ -81,15 +60,6 @@ h2 {
     margin-top: 24px;
 }
 
-time {
-    font-family: 'copperplate';
-    /* font-family: 'Playball', cursive; /* Playball font */
-    font-size: 24px;
-    color: black;                     /* text color */
-    letter-spacing: 2px;              /* optional spacing for style */
-    text-align: center;
-    margin-top: 24px;
-}
 
 p {
     font-family: 'typewriter';
