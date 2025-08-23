@@ -2,13 +2,12 @@ body {
     background-color: white; /* whole page background */
 }
 
-.timestamper {
-    background-color: #f1ed01a !important;
+.timestamper p {
+    background-color: green !important;
     border: 2px solid black !important;
     border-radius: 10px !important;
     padding: 5px 10px !important;
     display: flex !important;
-    align-items: center !important;
     text-align: center !important;
     margin: 25px;
 
