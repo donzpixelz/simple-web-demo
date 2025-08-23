@@ -5,12 +5,11 @@ body {
 
 
 .ztime  h2 {
-    font-family: 'copperplate';
+    font-family: 'copperplate' !important;
     /* font-family: 'Playball', cursive; /* Playball font */
-    font-size: 30px;
-    color: black;                     /* text color */
-    letter-spacing: 2px;              /* optional spacing for style */
-
+    font-size: 30px !important;
+    color: black !important;                     /* text color */
+    letter-spacing: 2px !important;              /* optional spacing for style */
     background-color: white !important;
     border: 2px dotted black !important;
     border-radius: 10px !important;
