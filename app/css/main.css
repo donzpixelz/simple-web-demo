@@ -2,28 +2,6 @@ body {
     background-color: white; /* whole page background */
 }
 
-.timestamper {
-    background-color: green !important;
-    border: 2px solid black !important;
-    border-radius: 10px !important;
-    padding: 5px 10px !important;
-    display: flex !important;
-    text-align: center !important;
-    margin: 25px;
-
-}
-
-
-
-.timestamper2 p {
-    font-family: 'copperplate' !important;
-    /* font-family: 'Playball', cursive; /* Playball font */
-    font-size: 30px !important;
-    color: white !important;                     /* text color */
-    letter-spacing: 2px !important;              /* optional spacing for style */
-    text-align: center !important;
-    flex: 1;              /* take all available horizontal space */
-}
 
 .header-outer {
     background-color: #3466cb !important;
