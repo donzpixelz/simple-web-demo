@@ -4,21 +4,7 @@ body {
 
 
 
-.ztime  h2 {
-    font-family: 'copperplate' !important;
-    /* font-family: 'Playball', cursive; /* Playball font */
-    font-size: 30px !important;
-    color: black !important;                     /* text color */
-    letter-spacing: 2px !important;              /* optional spacing for style */
-    background-color: white !important;
-    border: 2px dotted black !important;
-    border-radius: 10px !important;
-    padding: 5px 10px !important;
-    display: flex !important;
-    align-items: center !important;
-    text-align: center !important;
-    margin: 25px;
-}
+
 
 .ztimediv {
     background-color: yellow !important;
