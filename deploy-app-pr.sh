@@ -19,9 +19,10 @@ git fetch --prune origin
 git switch main 2>/dev/null || git switch -c main
 # fast-forward from origin/main; if diverged, stop with a clear message
 if ! git pull --ff-only origin main; then
-  echo "❌ Local 'main' diverged from origin. Run these once, then re-run this script:"
-  echo "   git fetch origin"
-  echo "   git reset --hard origin/main"
+  echo "Local 'main' diverged from origin."
+  echo "Run once, then re-run this script:"
+  echo "  git fetch origin"
+  echo "  git reset --hard origin/main"
   exit 1
 fi
 
@@ -29,7 +30,7 @@ step "Staging ONLY app/ changes"
 git add -A -- app/
 
 if git diff --cached --quiet; then
-  echo "✅ No changes detected in app/ (nothing to commit)."
+  echo "No changes detected in app/ (nothing to commit)."
   exit 0
 fi
 
@@ -67,7 +68,7 @@ step "Switching you back to 'main'"
 git switch main
 
 echo
-echo "📝 Open PR: $PR_URL"
+echo "Open PR: $PR_URL"
 command -v open >/dev/null && open "$PR_URL" || true
 
 cat <<'NEXT'
@@ -78,7 +79,4 @@ Next in browser:
   3) Click “Merge” (choose “Squash and merge”)
 
 After merge: deploy runs automatically.
-
-Tip: to see step-by-step shell debug, run:
-  DEBUG=1 bash -x ./deploy-app-pr.sh
 NEXT
