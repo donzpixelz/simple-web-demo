@@ -1,0 +1,33 @@
+name: PR Check — Static app
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "nginx/99-no-cache.conf"
+      - ".github/workflows/deploy.yml"
+      - ".github/workflows/pr-check.yml"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure app/index.html exists
+        run: |
+          test -f app/index.html || { echo "app/index.html is missing"; exit 1; }
+
+      - name: Guardrail: no files > 5 MB in app/
+        run: |
+          BIG=$(find app -type f -size +5M || true)
+          if [ -n "$BIG" ]; then
+            echo "These files exceed 5MB (not allowed):"
+            echo "$BIG"
+            exit 1
+          fi
+
+      - name: Print summary
+        run: |
+          echo "✅ PR check passed."
