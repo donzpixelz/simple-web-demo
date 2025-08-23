@@ -15,9 +15,7 @@ step() { printf '\n==> %s\n' "$*"; }
 
 step "Syncing local 'main' from origin/main"
 git fetch --prune origin
-# ensure we are on main; create if missing
 git switch main 2>/dev/null || git switch -c main
-# fast-forward from origin/main; if diverged, stop with a clear message
 if ! git pull --ff-only origin main; then
   echo "Local 'main' diverged from origin."
   echo "Run once, then re-run this script:"
@@ -52,8 +50,11 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
 fi
 
 if [[ -z "$PR_URL" ]]; then
-  ORIGIN="$(git remote get-url origin)"
-  PAIR="$(echo "$ORIGIN" | sed -E 's#(git@|https://)github\.com[:/]|\.git$##g')"
+  ORIGIN="$(git remote get-url --push origin)"
+  PAIR="$ORIGIN"
+  PAIR="${PAIR#git@github.com:}"
+  PAIR="${PAIR#https://github.com/}"
+  PAIR="${PAIR%.git}"
   OWNER="${PAIR%%/*}"
   REPO="${PAIR##*/}"
   PR_URL="https://github.com/${OWNER}/${REPO}/compare/main...${BR}?expand=1"
@@ -69,9 +70,9 @@ command -v open >/dev/null && open "$PR_URL" || true
 cat <<'NEXT'
 
 Next in browser:
-  1) Click “Create pull request”
+  1) Click "Create pull request"
   2) Wait for the PR check to turn green
-  3) Click “Merge” (choose “Squash and merge”)
+  3) Click "Merge" (choose "Squash and merge")
 
 After merge: deploy runs automatically.
 NEXT
