@@ -32,7 +32,7 @@ body {
 
 }
 
-.ztimediv h2 {
+.ztime h2 {
     flex: 1;              /* take all available horizontal space */
     text-align: center;    /* centers the H1 text inside its flex item */
     margin: 0;             /* reset default margin for better centering */
