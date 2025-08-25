@@ -1,215 +1,93 @@
-name: Deploy static app to EC2 (push-only app/, stock nginx, port 80 + no-cache)
+name: Deploy simple-web-demo to EC2
 
 on:
   push:
-    branches: ["main"]
+    branches: [ main ]      # ← no paths filter; runs on any merge to main
+  workflow_dispatch: {}      # ← lets you run it manually from Actions tab
 
-concurrency:
-  group: deploy-main
-  cancel-in-progress: true
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  INSTANCE_NAME: simple-web-demo
+  SERVICE_NAME: simple-web-demo
+  REMOTE_USER: ubuntu
+  REMOTE_DIR: /home/ubuntu/deploy/simple-web-demo
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
-    env:
-      AWS_REGION: us-east-2
-      EC2_KEY_NAME: simple-web-demo-key
-      WEB_ROOT: /opt/simple-web-demo/app
-      CONF_FILE: /opt/simple-web-demo/nginx/99-no-cache.conf
-      CONTAINER: simple-web-demo
-
     steps:
-      - name: Checkout (shallow)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: Detect changed paths
-        id: changes
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            app:
-              - 'app/**'
-            conf:
-              - 'nginx/99-no-cache.conf'
-            workflow:
-              - '.github/workflows/deploy.yml'
-
-      - name: Stop early if nothing relevant changed
-        if: steps.changes.outputs.app != 'true' && steps.changes.outputs.conf != 'true' && steps.changes.outputs.workflow != 'true'
-        run: |
-          echo "No app/ or nginx conf changes; skipping deploy."
-          exit 0
-
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Find EC2 instance/host/SGs
-        id: ec2
-        shell: bash
+      - name: Resolve EC2 public IP from Name tag
+        id: ip
         run: |
-          set -euo pipefail
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=key-name,Values=${EC2_KEY_NAME}" "Name=instance-state-name,Values=running" \
-            --query "Reservations[].Instances[].InstanceId" --output text | head -n1)
-          if [[ -z "$INSTANCE_ID" || "$INSTANCE_ID" == "None" ]]; then
-            echo "No running instance found with key-name=${EC2_KEY_NAME} in ${AWS_REGION}"
-            exit 1
-          fi
-          HOST=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
-            --query "Reservations[].Instances[].PublicDnsName" --output text)
-          SG_IDS=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
-            --query "Reservations[].Instances[].SecurityGroups[].GroupId" --output text)
-          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
-          echo "host=$HOST" >> "$GITHUB_OUTPUT"
-          echo "sg_ids=$SG_IDS" >> "$GITHUB_OUTPUT"
+          IP=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${INSTANCE_NAME}" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          [ -n "$IP" ] && [ "$IP" != "None" ] || { echo "No running instance named ${INSTANCE_NAME}"; exit 1; }
+          echo "ip=$IP" >> "$GITHUB_OUTPUT"
 
-      - name: Authorize runner IP for SSH (temp)
-        id: sshopen
-        shell: bash
+      - name: Setup SSH
         run: |
-          set -euo pipefail
-          RUNNER_IP=$(curl -s https://checkip.amazonaws.com | tr -d '\n')
-          for SG in ${{ steps.ec2.outputs.sg_ids }}; do
-            aws ec2 authorize-security-group-ingress \
-              --group-id "$SG" \
-              --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${RUNNER_IP}/32,Description=gha-temp}]" \
-              || true
-          done
-          echo "runner_ip=$RUNNER_IP" >> "$GITHUB_OUTPUT"
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ steps.ip.outputs.ip }} >> ~/.ssh/known_hosts
 
-      - name: Prepare server (Docker + paths)
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ steps.ec2.outputs.host }}
-          username: ec2-user
-          key: ${{ secrets.AWS_EC2_SSH_KEY }}
-          script: |
-            set -euxo pipefail
-            WEB_ROOT="${{ env.WEB_ROOT }}"
-            CONF_FILE="${{ env.CONF_FILE }}"
-            if ! command -v docker >/dev/null 2>&1; then
-              curl -fsSL https://get.docker.com | sh
-            fi
-            sudo systemctl start docker || sudo service docker start || true
-            for i in {1..10}; do
-              sudo docker info >/dev/null 2>&1 && break
-              sleep 1
+      - name: Push app/ and Dockerfile to instance
+        run: |
+          ssh ${{ env.REMOTE_USER }}@${{ steps.ip.outputs.ip }} "sudo mkdir -p '${REMOTE_DIR}' && sudo chown -R \$USER:\$USER '${REMOTE_DIR}'"
+          rsync -avz --delete app/ ${{ env.REMOTE_USER }}@${{ steps.ip.outputs.ip }}:${{ env.REMOTE_DIR }}/app/ || true
+          scp Dockerfile ${{ env.REMOTE_USER }}@${{ steps.ip.outputs.ip }}:${{ env.REMOTE_DIR }}/Dockerfile || true
+
+      - name: Build & hot-swap container (always free port 80 first)
+        run: |
+          ssh ${{ env.REMOTE_USER }}@${{ steps.ip.outputs.ip }} <<'EOF'
+            set -euo pipefail
+            cd "${REMOTE_DIR}"
+
+            # 1) Stop system webservers that may hold :80
+            for svc in nginx apache2 httpd; do
+              if systemctl is-active --quiet "$svc"; then
+                sudo systemctl stop "$svc" || true
+                sudo systemctl disable "$svc" || true
+              fi
             done
-            sudo docker info >/dev/null
-            sudo mkdir -p "${WEB_ROOT}"
-            sudo mkdir -p "$(dirname "${CONF_FILE}")"
-            sudo chown -R "$USER:$USER" /opt/simple-web-demo
 
-      - name: Upload nginx/99-no-cache.conf (single file)
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ steps.ec2.outputs.host }}
-          username: ec2-user
-          key: ${{ secrets.AWS_EC2_SSH_KEY }}
-          source: "nginx/99-no-cache.conf"
-          target: "${{ env.CONF_FILE }}"
-          overwrite: true
+            # 2) Remove existing service container (ok if missing)
+            docker rm -f "${SERVICE_NAME}" || true
 
-      - name: Upload app/ to server (flatten contents)
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ steps.ec2.outputs.host }}
-          username: ec2-user
-          key: ${{ secrets.AWS_EC2_SSH_KEY }}
-          source: "app/**"
-          target: "${{ env.WEB_ROOT }}/"
-          strip_components: 1
+            # 3) Kill any other containers on :80
+            OTHER_ON_80=$(docker ps --format '{{.Names}} {{.Ports}}' | awk '/0.0.0.0:80->/ {print $1}')
+            [ -n "${OTHER_ON_80:-}" ] && docker rm -f $OTHER_ON_80 || true
 
-      - name: Recreate container (stock nginx + no-cache file) and verify (with fallback)
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ steps.ec2.outputs.host }}
-          username: ec2-user
-          key: ${{ secrets.AWS_EC2_SSH_KEY }}
-          script: |
-            set -euxo pipefail
-            WEB_ROOT="${{ env.WEB_ROOT }}"
-            CONF_FILE="${{ env.CONF_FILE }}"
-            CONTAINER="${{ env.CONTAINER }}"
-
-            sudo docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
-            sudo docker run -d --name "${CONTAINER}" \
-              -p 80:80 \
-              -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
-              -v "${CONF_FILE}":/etc/nginx/conf.d/99-no-cache.conf:ro \
-              --restart unless-stopped \
-              nginx:alpine
-
-            # Wait briefly; if nginx isn't healthy or keeps restarting, fallback
-            sleep 2
-            FALLBACK=0
-            for i in {1..6}; do
-              if sudo docker exec "${CONTAINER}" nginx -t; then
+            # 4) Wait until :80 is truly free (up to 20s)
+            for i in {1..20}; do
+              if ! sudo ss -tulpen | grep -qE '(^|[[:space:]])80([[:space:]]|$)'; then
                 break
               fi
-              if ! sudo docker ps --filter "name=${CONTAINER}" --format '{{.Status}}' | grep -qi 'Up'; then
-                FALLBACK=1; break
-              fi
               sleep 1
             done
-            if [ "$FALLBACK" -eq 1 ]; then
-              echo "Custom no-cache conf failed; falling back to stock nginx."
-              sudo docker logs --tail 100 "${CONTAINER}" || true
-              sudo docker rm -f "${CONTAINER}" || true
-              sudo docker run -d --name "${CONTAINER}" \
-                -p 80:80 \
-                -v "${WEB_ROOT}":/usr/share/nginx/html:ro \
-                --restart unless-stopped \
-                nginx:alpine
-              sleep 2
+            if sudo ss -tulpen | grep -qE '(^|[[:space:]])80([[:space:]]|$)'; then
+              echo "ERROR: Port 80 not free"; sudo ss -tulpen | grep ':80 ' || true; exit 125
             fi
 
-            echo "--- docker ps ---"
-            sudo docker ps --filter "name=${CONTAINER}" --format 'ports={{.Ports}} status={{.Status}}'
-            echo "--- curl inside container ---"
-            sudo docker exec "${CONTAINER}" sh -lc 'wget -qO- http://127.0.0.1/ | head -n 10 || true'
+            # 5) Build new image and start the service
+            docker build -t "${SERVICE_NAME}:latest" .
+            docker run -d --restart=always --name "${SERVICE_NAME}" -p 80:80 "${SERVICE_NAME}:latest"
 
-      - name: Ensure SG allows TCP/80 from 0.0.0.0/0 (and try to remove 8080)
-        shell: bash
-        run: |
-          set -euo pipefail
-          for SG in ${{ steps.ec2.outputs.sg_ids }}; do
-            aws ec2 authorize-security-group-ingress \
-              --group-id "$SG" \
-              --ip-permissions 'IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0,Description=web-80}]' \
-              || true
-            aws ec2 revoke-security-group-ingress \
-              --group-id "$SG" \
-              --ip-permissions 'IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=0.0.0.0/0}]' \
-              || true
-          done
-
-      - name: Revoke runner IP for SSH (cleanup)
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          RUNNER_IP="${{ steps.sshopen.outputs.runner_ip }}"
-          if [[ -n "$RUNNER_IP" ]]; then
-            for SG in ${{ steps.ec2.outputs.sg_ids }}; do
-              aws ec2 revoke-security-group-ingress \
-                --group-id "$SG" \
-                --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${RUNNER_IP}/32,Description=gha-temp}]" \
-                || true
-            done
-          fi
-
-      - name: Smoke test (port 80)
-        env:
-          HOST: ${{ steps.ec2.outputs.host }}
-        run: |
-          set -euo pipefail
-          curl -v --retry 4 --retry-connrefused --retry-delay 3 --max-time 20 \
-            -fsS "http://${HOST}/?nocache=$(date +%s)" >/dev/null
+            # 6) Health check
+            curl -fsS "http://127.0.0.1/?v=$(date +%s)" | head -n 3 >/dev/null
+            echo "Deploy OK: ${SERVICE_NAME} on :80"
+          EOF
