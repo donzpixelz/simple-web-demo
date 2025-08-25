@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# save — commit ONLY app/ changes, push, open PR + Actions (PR Check)
+set -euo pipefail
+cd "$(dirname "$0")"
+
+# figure out owner/repo for URLs
+ORIGIN="$(git remote get-url --push origin)"
+PAIR="${ORIGIN#git@github.com:}"; PAIR="${PAIR#https://github.com/}"; PAIR="${PAIR%.git}"
+OWNER="${PAIR%%/*}"; REPO="${PAIR##*/}"
+
+# pick an opener (macOS 'open', Linux 'xdg-open', else print URLs)
+OPEN_CMD=""
+if command -v open >/dev/null 2>&1; then OPEN_CMD="open"
+elif command -v xdg-open >/dev/null 2>&1; then OPEN_CMD="xdg-open"
+fi
+
+CURBR="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo)"
+[ -n "$CURBR" ] || { echo "Not in a git repo."; exit 1; }
+
+# If you're on main, branch from your CURRENT tree (no pull) so edits aren't lost
+if [ "$CURBR" = "main" ]; then
+  BR="app-$(date +%Y%m%d-%H%M%S)"
+  echo "ℹ️  On main → creating branch $BR from current working tree"
+  git switch -c "$BR"
+else
+  BR="$CURBR"
+fi
+
+# stage ONLY app/ changes
+git add -A -- app/
+if git diff --cached --quiet; then
+  echo "No changes under app/. Nothing to commit."
+  exit 0
+fi
+
+MSG=${1:-"Update app (static content)"}
+git commit -m "$MSG"
+git push -u origin HEAD
+
+# Create PR if needed, then get its URL
+PR_URL=""
+if command -v gh >/dev/null 2>&1; then
+  # If no PR exists for this head, create one
+  if ! gh pr view >/dev/null 2>&1; then
+    gh pr create -B main -t "$MSG" -b "Automated via ./save" >/dev/null
+  fi
+  PR_URL="$(gh pr view --json url -q .url 2>/dev/null || true)"
+else
+  PR_URL="https://github.com/${OWNER}/${REPO}/compare/main...${BR}?expand=1"
+fi
+
+echo "✅ Pushed branch $BR"
+echo "PR: ${PR_URL:-"(unknown)"}"
+
+# Open PR page and Actions (PR Check) page if we can
+if [ -n "$OPEN_CMD" ]; then
+  [ -n "$PR_URL" ] && $OPEN_CMD "$PR_URL" || true
+  # Open Actions filtered to PR Check workflow + this branch
+  ACT_URL="https://github.com/${OWNER}/${REPO}/actions?query=workflow%3A%22PR+Check+%28ssg-examples%29%22+branch%3A${BR}"
+  $OPEN_CMD "$ACT_URL" || true
+fi
+
+echo "Next:"
+echo "  1) In the browser: wait for PR checks to go green."
+echo "  2) Click Merge."
+echo "  3) After merge, run ./sync to update local main."

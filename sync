@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# sync — fast-forward local main to remote (after PR merge)
+set -euo pipefail
+cd "$(dirname "$0")"
+git fetch origin
+git switch main 2>/dev/null || git checkout -B main
+git pull --ff-only origin main
+echo "✅ main is up to date with origin/main."
+git --no-pager log --oneline -n 3
+
+# Optional: ./sync --clean to delete merged app-* branches locally
+if [ "${1:-}" = "--clean" ]; then
+  echo "🧹 Cleaning merged local app-* branches…"
+  git for-each-ref --format='%(refname:short)' refs/heads/app-* | while read -r b; do
+    if git merge-base --is-ancestor "$b" origin/main; then git branch -D "$b" || true; fi
+  done
+fi

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# start — create a fresh feature branch from the latest main
+set -euo pipefail
+cd "$(dirname "$0")"
+git fetch origin
+git switch main 2>/dev/null || git checkout -B main
+git pull --ff-only origin main
+BR="app-$(date +%Y%m%d-%H%M%S)"
+git switch -c "$BR"
+echo "➡️  On branch: $BR (edit files under app/ then run ./save)"
